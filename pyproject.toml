@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stegokit"
+version = "0.1.0"
+description = "A modular toolkit for generative steganography algorithms."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "UNLICENSED"
+authors = [
+  { name = "stegokit contributors" }
+]
+dependencies = [
+  "torch>=2.1"
+]
+keywords = ["steganography", "nlp", "llm", "security"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: OS Independent",
+  "Topic :: Security",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "algo*", "utils*", "stegokit*"]
