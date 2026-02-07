@@ -1,70 +1,112 @@
 from __future__ import annotations
 
-from core.algorithm_enum import StegoAlgorithm
-from core.stego_context import DecodeContext, EncodeContext
-from core.stego_dispatcher import StegoDispatcher
-from utils import PRG
+import logging
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from core import StegoAlgorithm, StegoDispatcher
 
 
-def run_roundtrip(algorithm: StegoAlgorithm):
+MODEL_PATH = "/root/autodl-fs/Meta-Llama-3-8B-Instruct/"
+
+
+def _pick_dtype() -> torch.dtype:
+    if not torch.cuda.is_available():
+        return torch.float32
+    return torch.float16
+
+
+def _load_model_and_tokenizer(model_path: str):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype = _pick_dtype()
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(model_path, dtype=dtype)
+    model.to(device)
+    model.eval()
+    return model, tokenizer
+
+
+def run_asymmetric_demo(model_path: str = MODEL_PATH):
     dispatcher = StegoDispatcher(verbose=True)
+    model, tokenizer = _load_model_and_tokenizer(model_path)
 
-    prob_table = [0.42, 0.26, 0.18, 0.09, 0.05]
-    indices = [10, 20, 30, 40, 50]
-    bit_stream = "010111001101011010010111"
-    precision = 16
-    steps = 4
+    prompt = "Please write some advice on privacy protection."
+    bit_stream = "01011100110101101001011100100111010110100101110011010110"
+    seed = "12345"
+    secure_parameter = 32
+    func_type = 1
 
-    enc_prg = PRG.from_int_seed(seed=11)
-    dec_prg = PRG.from_int_seed(seed=11)
-    bit_index = 0
-    tokens = []
-    interval = None
+    enc = dispatcher.embed(
+        algorithm=StegoAlgorithm.ASYMMETRIC,
+        model=model,
+        tokenizer=tokenizer,
+        secret_bits=bit_stream,
+        prompt=prompt,
+        max_new_tokens=512,
+        temperature=1.2,
+        top_k=50,
+        precision=16,
+        extra={
+            "seed": seed,
+            "secure_parameter": secure_parameter,
+            "func_type": func_type,
+            "use_chat_template": False,
+        },
+    )
 
-    print(f"\n=== Encode: {algorithm.value} ===")
-    for _ in range(steps):
-        er = dispatcher.dispatch_encode(
-            EncodeContext(
-                algorithm=algorithm,
-                prob_table=prob_table,
-                indices=indices,
-                bit_stream=bit_stream,
-                bit_index=bit_index,
-                precision=precision,
-                prg=enc_prg,
-                cur_interval=interval,
-            )
-        )
-        tokens.append(er.sampled_token_id)
-        bit_index = er.metadata.get("next_bit_index", bit_index + er.bits_consumed)
-        interval = er.metadata.get("cur_interval")
-        print(f"token={er.sampled_token_id}, bits_used={er.bits_consumed}, next_bit_index={bit_index}")
+    dec_regular = dispatcher.extract(
+        algorithm=StegoAlgorithm.ASYMMETRIC,
+        model=model,
+        tokenizer=tokenizer,
+        generated_token_ids=enc.generated_token_ids,
+        prompt=prompt,
+        temperature=1.2,
+        top_k=50,
+        precision=16,
+        max_bits=enc.consumed_bits,
+        extra={
+            "decode_mode": "regular",
+            "seed": seed,
+            "secure_parameter": secure_parameter,
+            "func_type": func_type,
+            "use_chat_template": False,
+        },
+    )
 
-    print(f"\n=== Decode: {algorithm.value} ===")
-    recovered = ""
-    interval = None
-    for token_id in tokens:
-        dr = dispatcher.dispatch_decode(
-            DecodeContext(
-                algorithm=algorithm,
-                prob_table=prob_table,
-                indices=indices,
-                prev_token_id=token_id,
-                precision=precision,
-                prg=dec_prg,
-                cur_interval=interval,
-            )
-        )
-        recovered += dr.bits
-        interval = dr.metadata.get("cur_interval")
-        print(f"token={token_id}, recovered_bits='{dr.bits}'")
+    dec_robust = dispatcher.extract(
+        algorithm=StegoAlgorithm.ASYMMETRIC,
+        model=model,
+        tokenizer=tokenizer,
+        generated_token_ids=enc.generated_token_ids,
+        prompt=prompt,
+        temperature=1.2,
+        top_k=50,
+        precision=16,
+        max_bits=enc.consumed_bits,
+        extra={
+            "decode_mode": "robust",
+            "seed": seed,
+            "secure_parameter": secure_parameter,
+            "func_type": func_type,
+            "robust_search_window": 1000,
+            "use_chat_template": False,
+        },
+    )
 
-    print("\n=== Result ===")
-    print("consumed_bits:", bit_index)
-    print("origin_prefix:", bit_stream[:bit_index])
-    print("recover_prefix:", recovered[:bit_index])
-    print("match:", recovered[:bit_index] == bit_stream[:bit_index])
+    print("\n=== Stego Demo: asymmetric ===")
+    print("model_path:", model_path)
+    print("generated_text:", enc.text)
+    print("consumed_bits:", enc.consumed_bits)
+    print("regular_bits:", dec_regular.bits)
+    print("regular_match:", dec_regular.bits == bit_stream[:enc.consumed_bits])
+    print("robust_bits:", dec_robust.bits)
+    print("robust_match:", dec_robust.bits == bit_stream[:enc.consumed_bits])
 
 
 if __name__ == "__main__":
-    run_roundtrip(StegoAlgorithm.AC)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    run_asymmetric_demo(MODEL_PATH)

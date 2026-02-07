@@ -9,7 +9,7 @@ class StegoAlgorithm(StrEnum):
     BINARY_BASED = "binary_based"
     STABILITY_BASED = "stability_based"
     METEOR = "meteor"
-
+    ASYMMETRIC = "asymmetric"
 
 
 

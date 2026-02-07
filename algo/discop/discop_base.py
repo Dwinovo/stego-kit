@@ -1,17 +1,118 @@
 from __future__ import annotations
 
 import math
+from typing import Any, Sequence
 
 import torch
 
-from algo.common import bit_slice_with_padding
+from algo.common import _filter_distribution, _prepare_prefix_ids, bit_slice_with_padding
 from .common import DiscopCommonMixin
-from core.stego_algorithm import DecodeResult, EncodeResult
-from core.stego_context import DecodeContext, EncodeContext
+from core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
+from core.stego_context import StegoDecodeContext, StegoEncodeContext
 
 
 class DiscopBaseStrategy(DiscopCommonMixin):
     """Discop-base strategy."""
+
+    def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
+        prefix_ids = _prepare_prefix_ids(context.prompt, context.model, context.tokenizer)
+        x = prefix_ids
+        past_key_values = None
+        bit_index = 0
+        cur_interval = None
+        eos_token_id = getattr(context.tokenizer, "eos_token_id", None)
+        generated_ids: list[int] = []
+
+        for _ in range(context.max_new_tokens):
+            with torch.no_grad():
+                output = context.model(input_ids=x, past_key_values=past_key_values, use_cache=True)
+            logits = output.logits[0, -1, :]
+            past_key_values = getattr(output, "past_key_values", None)
+            probs, token_indices = _filter_distribution(logits, context.temperature, context.top_k, context.top_p)
+
+            er = self._encode_token_step(
+                prob_table=probs.tolist(),
+                indices=token_indices.tolist(),
+                bit_stream=context.secret_bits,
+                bit_index=bit_index,
+                precision=context.precision,
+                prg=context.prg,
+                cur_interval=cur_interval,
+                extra=context.extra,
+            )
+            sampled_token_id = er.get("sampled_token_id")
+            if sampled_token_id is None:
+                raise RuntimeError("DiscopBaseStrategy._encode_token_step returned sampled_token_id=None")
+            token_id = int(sampled_token_id)
+            generated_ids.append(token_id)
+            bits_consumed = int(er.get("bits_consumed", 0))
+            bit_index = int(er.get("next_bit_index", bit_index + bits_consumed))
+            cur_interval = er.get("cur_interval", cur_interval)
+            x = torch.tensor([[token_id]], device=prefix_ids.device, dtype=torch.long)
+
+            if eos_token_id is not None and token_id == int(eos_token_id):
+                break
+
+        text = context.tokenizer.decode(generated_ids)
+        effective_consumed_bits = min(bit_index, len(context.secret_bits))
+        return StegoEncodeResult(
+            generated_token_ids=generated_ids,
+            consumed_bits=effective_consumed_bits,
+            text=text,
+            metadata={
+                "algorithm": context.algorithm,
+                "final_bit_index": bit_index,
+                "cur_interval": cur_interval,
+                "generated_steps": len(generated_ids),
+                "embedded_bits": context.secret_bits[:effective_consumed_bits],
+            },
+        )
+
+    def decode(self, context: StegoDecodeContext) -> StegoDecodeResult:
+        if not context.generated_token_ids:
+            return StegoDecodeResult(bits="", metadata={"decoded_steps": 0})
+
+        prefix_ids = _prepare_prefix_ids(context.prompt, context.model, context.tokenizer)
+        x = prefix_ids
+        past_key_values = None
+        cur_interval = None
+        recovered_parts: list[str] = []
+        recovered_len = 0
+        decoded_steps = 0
+
+        for token_id in context.generated_token_ids:
+            with torch.no_grad():
+                output = context.model(input_ids=x, past_key_values=past_key_values, use_cache=True)
+            logits = output.logits[0, -1, :]
+            past_key_values = getattr(output, "past_key_values", None)
+            probs, token_indices = _filter_distribution(logits, context.temperature, context.top_k, context.top_p)
+
+            dr = self._decode_token_step(
+                prob_table=probs.tolist(),
+                indices=token_indices.tolist(),
+                prev_token_id=int(token_id),
+                precision=context.precision,
+                prg=context.prg,
+                cur_interval=cur_interval,
+                extra=context.extra,
+            )
+            bits = str(dr.get("bits", ""))
+            recovered_parts.append(bits)
+            recovered_len += len(bits)
+            decoded_steps += 1
+            cur_interval = dr.get("cur_interval", cur_interval)
+            x = torch.tensor([[int(token_id)]], device=prefix_ids.device, dtype=torch.long)
+
+            if context.max_bits is not None and recovered_len >= context.max_bits:
+                break
+
+        bits = "".join(recovered_parts)
+        if context.max_bits is not None:
+            bits = bits[: context.max_bits]
+        return StegoDecodeResult(
+            bits=bits,
+            metadata={"algorithm": context.algorithm, "cur_interval": cur_interval, "decoded_steps": decoded_steps},
+        )
 
     @staticmethod
     def _baseline_encode_step(indices: list[int], probs: list[float], message_bits: str, bit_index: int, prg, precision: int):
@@ -103,25 +204,48 @@ class DiscopBaseStrategy(DiscopCommonMixin):
         tbl_swapped = dict(zip(tbl.values(), tbl.keys()))
         return bin(tbl_swapped[stego_t])[2:].zfill(n_bits)
 
-    def encode(self, context: EncodeContext) -> EncodeResult:
-        prg = self._require_prg(context.prg)
-        probs_list, indices_list = self._prepare_inputs(context.prob_table, context.indices)
+    def _encode_token_step(
+        self,
+        *,
+        prob_table: Sequence[float],
+        indices: Sequence[int],
+        bit_stream: str,
+        bit_index: int,
+        precision: int,
+        prg: Any | None,
+        cur_interval: list[int] | None,
+        extra: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        del cur_interval, extra
+        prg = self._require_prg(prg)
+        probs_list, indices_list = self._prepare_inputs(prob_table, indices)
 
-        bits_slice = bit_slice_with_padding(context.bit_stream, context.bit_index, context.precision)
+        bits_slice = bit_slice_with_padding(bit_stream, bit_index, precision)
 
         sampled_index, n_bits = self._baseline_encode_step(
-            indices_list, probs_list, bits_slice, 0, prg, context.precision
+            indices_list, probs_list, bits_slice, 0, prg, precision
         )
 
-        return EncodeResult(
-            sampled_token_id=int(sampled_index),
-            bits_consumed=int(n_bits),
-            metadata={"next_bit_index": context.bit_index + int(n_bits)},
-        )
+        return {
+            "sampled_token_id": int(sampled_index),
+            "bits_consumed": int(n_bits),
+            "next_bit_index": bit_index + int(n_bits),
+        }
 
-    def decode(self, context: DecodeContext) -> DecodeResult:
-        prg = self._require_prg(context.prg)
-        probs_list, indices_list = self._prepare_inputs(context.prob_table, context.indices)
-        stego_t = int(context.prev_token_id)
-        bits = self._baseline_decode_step(indices_list, probs_list, stego_t, prg, context.precision)
-        return DecodeResult(bits=bits, metadata={"bits_len": len(bits)})
+    def _decode_token_step(
+        self,
+        *,
+        prob_table: Sequence[float],
+        indices: Sequence[int],
+        prev_token_id: int,
+        precision: int,
+        prg: Any | None,
+        cur_interval: list[int] | None,
+        extra: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        del cur_interval, extra
+        prg = self._require_prg(prg)
+        probs_list, indices_list = self._prepare_inputs(prob_table, indices)
+        stego_t = int(prev_token_id)
+        bits = self._baseline_decode_step(indices_list, probs_list, stego_t, prg, precision)
+        return {"bits": bits, "bits_len": len(bits)}

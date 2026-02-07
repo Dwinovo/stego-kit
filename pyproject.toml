@@ -12,9 +12,6 @@ license = "MIT"
 authors = [
   { name = "StegoKit contributors" }
 ]
-dependencies = [
-  "torch>=2.1"
-]
 keywords = ["steganography", "nlp", "llm", "security"]
 classifiers = [
   "Programming Language :: Python :: 3",

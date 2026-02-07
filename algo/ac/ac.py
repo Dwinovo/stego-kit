@@ -1,23 +1,140 @@
 from __future__ import annotations
 
+from typing import Any, Sequence
+
+import torch
+
 from algo.common import (
+    _filter_distribution,
+    _prepare_prefix_ids,
     bit_slice_with_padding,
     msb_bits2int,
     msb_int2bits,
     num_same_from_beg,
     to_sorted_tensors,
 )
-from core.stego_algorithm import DecodeResult, EncodeResult
-from core.stego_context import DecodeContext, EncodeContext
+from core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
+from core.stego_context import StegoDecodeContext, StegoEncodeContext
 
 
 class ACStrategy:
     """Arithmetic-coding-based steganography strategy."""
 
-    def encode(self, context: EncodeContext) -> EncodeResult:
-        prob, indices = to_sorted_tensors(context.prob_table, context.indices)
-        precision = context.precision
-        cur_interval = list(context.cur_interval or [0, 2 ** precision])
+    def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
+        prefix_ids = _prepare_prefix_ids(context.prompt, context.model, context.tokenizer)
+        x = prefix_ids
+        past_key_values = None
+        bit_index = 0
+        cur_interval = None
+        eos_token_id = getattr(context.tokenizer, "eos_token_id", None)
+        generated_ids: list[int] = []
+
+        for _ in range(context.max_new_tokens):
+            with torch.no_grad():
+                output = context.model(input_ids=x, past_key_values=past_key_values, use_cache=True)
+            logits = output.logits[0, -1, :]
+            past_key_values = getattr(output, "past_key_values", None)
+            probs, token_indices = _filter_distribution(logits, context.temperature, context.top_k, context.top_p)
+
+            er = self._encode_token_step(
+                prob_table=probs.tolist(),
+                indices=token_indices.tolist(),
+                bit_stream=context.secret_bits,
+                bit_index=bit_index,
+                precision=context.precision,
+                prg=context.prg,
+                cur_interval=cur_interval,
+                extra=context.extra,
+            )
+            sampled_token_id = er.get("sampled_token_id")
+            if sampled_token_id is None:
+                raise RuntimeError("ACStrategy._encode_token_step returned sampled_token_id=None")
+            token_id = int(sampled_token_id)
+            generated_ids.append(token_id)
+            bits_consumed = int(er.get("bits_consumed", 0))
+            bit_index = int(er.get("next_bit_index", bit_index + bits_consumed))
+            cur_interval = er.get("cur_interval", cur_interval)
+            x = torch.tensor([[token_id]], device=prefix_ids.device, dtype=torch.long)
+
+            if eos_token_id is not None and token_id == int(eos_token_id):
+                break
+
+        text = context.tokenizer.decode(generated_ids)
+        effective_consumed_bits = min(bit_index, len(context.secret_bits))
+        return StegoEncodeResult(
+            generated_token_ids=generated_ids,
+            consumed_bits=effective_consumed_bits,
+            text=text,
+            metadata={
+                "algorithm": context.algorithm,
+                "final_bit_index": bit_index,
+                "cur_interval": cur_interval,
+                "generated_steps": len(generated_ids),
+                "embedded_bits": context.secret_bits[:effective_consumed_bits],
+            },
+        )
+
+    def decode(self, context: StegoDecodeContext) -> StegoDecodeResult:
+        if not context.generated_token_ids:
+            return StegoDecodeResult(bits="", metadata={"decoded_steps": 0})
+
+        prefix_ids = _prepare_prefix_ids(context.prompt, context.model, context.tokenizer)
+        x = prefix_ids
+        past_key_values = None
+        cur_interval = None
+        recovered_parts: list[str] = []
+        recovered_len = 0
+        decoded_steps = 0
+
+        for token_id in context.generated_token_ids:
+            with torch.no_grad():
+                output = context.model(input_ids=x, past_key_values=past_key_values, use_cache=True)
+            logits = output.logits[0, -1, :]
+            past_key_values = getattr(output, "past_key_values", None)
+            probs, token_indices = _filter_distribution(logits, context.temperature, context.top_k, context.top_p)
+
+            dr = self._decode_token_step(
+                prob_table=probs.tolist(),
+                indices=token_indices.tolist(),
+                prev_token_id=int(token_id),
+                precision=context.precision,
+                prg=context.prg,
+                cur_interval=cur_interval,
+                extra=context.extra,
+            )
+            bits = str(dr.get("bits", ""))
+            recovered_parts.append(bits)
+            recovered_len += len(bits)
+            decoded_steps += 1
+            cur_interval = dr.get("cur_interval", cur_interval)
+            x = torch.tensor([[int(token_id)]], device=prefix_ids.device, dtype=torch.long)
+
+            if context.max_bits is not None and recovered_len >= context.max_bits:
+                break
+
+        bits = "".join(recovered_parts)
+        if context.max_bits is not None:
+            bits = bits[: context.max_bits]
+        return StegoDecodeResult(
+            bits=bits,
+            metadata={"algorithm": context.algorithm, "cur_interval": cur_interval, "decoded_steps": decoded_steps},
+        )
+
+    def _encode_token_step(
+        self,
+        *,
+        prob_table: Sequence[float],
+        indices: Sequence[int],
+        bit_stream: str,
+        bit_index: int,
+        precision: int,
+        prg: Any | None,
+        cur_interval: list[int] | None,
+        extra: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        del prg, extra
+        prob, indices = to_sorted_tensors(prob_table, indices)
+        cur_interval = list(cur_interval or [0, 2 ** precision])
 
         cur_int_range = cur_interval[1] - cur_interval[0]
         cur_threshold = 1 / cur_int_range
@@ -36,7 +153,7 @@ class ACStrategy:
         cum_probs += cur_int_range - cum_probs[-1]
         cum_probs += cur_interval[0]
 
-        bits_slice = bit_slice_with_padding(context.bit_stream, context.bit_index, precision)
+        bits_slice = bit_slice_with_padding(bit_stream, bit_index, precision)
         message_idx = msb_bits2int([int(ch) for ch in bits_slice])
         selection = (cum_probs > message_idx).nonzero()[0].item()
 
@@ -53,19 +170,27 @@ class ACStrategy:
         next_interval = [msb_bits2int(new_int_bottom_bits), msb_bits2int(new_int_top_bits) + 1]
         sampled_token_id = int(indices[selection].item())
 
-        return EncodeResult(
-            sampled_token_id=sampled_token_id,
-            bits_consumed=num_bits_encoded,
-            metadata={
-                "cur_interval": next_interval,
-                "next_bit_index": context.bit_index + num_bits_encoded,
-            },
-        )
+        return {
+            "sampled_token_id": sampled_token_id,
+            "bits_consumed": num_bits_encoded,
+            "cur_interval": next_interval,
+            "next_bit_index": bit_index + num_bits_encoded,
+        }
 
-    def decode(self, context: DecodeContext) -> DecodeResult:
-        prob, indices = to_sorted_tensors(context.prob_table, context.indices)
-        precision = context.precision
-        cur_interval = list(context.cur_interval or [0, 2 ** precision])
+    def _decode_token_step(
+        self,
+        *,
+        prob_table: Sequence[float],
+        indices: Sequence[int],
+        prev_token_id: int,
+        precision: int,
+        prg: Any | None,
+        cur_interval: list[int] | None,
+        extra: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        del prg, extra
+        prob, indices = to_sorted_tensors(prob_table, indices)
+        cur_interval = list(cur_interval or [0, 2 ** precision])
 
         cur_int_range = cur_interval[1] - cur_interval[0]
         cur_threshold = 1 / cur_int_range
@@ -82,11 +207,11 @@ class ACStrategy:
         if len(overfill_index) > 0:
             cum_probs = cum_probs[:overfill_index[0]]
 
-        prev = int(context.prev_token_id)
+        prev = int(prev_token_id)
         if prev not in indices:
-            return DecodeResult(bits="", metadata={"cur_interval": cur_interval})
+            return {"bits": "", "bits_len": 0, "cur_interval": cur_interval}
         if len(overfill_index) > 0 and prev in indices[overfill_index]:
-            return DecodeResult(bits="", metadata={"cur_interval": cur_interval})
+            return {"bits": "", "bits_len": 0, "cur_interval": cur_interval}
 
         cum_probs += cur_int_range - cum_probs[-1]
         cum_probs += cur_interval[0]
@@ -104,4 +229,4 @@ class ACStrategy:
         new_int_top_bits = new_int_top_bits_inc[num_bits_decoded:] + [1] * num_bits_decoded
         next_interval = [msb_bits2int(new_int_bottom_bits), msb_bits2int(new_int_top_bits) + 1]
 
-        return DecodeResult(bits=bits, metadata={"cur_interval": next_interval})
+        return {"bits": bits, "bits_len": len(bits), "cur_interval": next_interval}

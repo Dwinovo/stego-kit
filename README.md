@@ -1,7 +1,7 @@
 # StegoKit
 
 `StegoKit` 是一个面向“生成式隐写算法”的模块化工具库。  
-当前实现重点是：统一算法接口、统一分发器、可插拔算法注册、可复现实验（PRG 注入）。
+当前主接口是统一的 Stego 接口（model-in-the-loop）。
 
 ## 目录结构
 
@@ -15,6 +15,17 @@ stegokit/
 ```
 
 ## 安装
+
+### 先安装 PyTorch（按你的环境选择 CPU/CUDA 版本）
+
+`StegoKit` 不再强绑定 `torch` 版本，避免覆盖你已有环境。  
+请先自行安装合适的 PyTorch，再安装 `StegoKit`。
+
+示例（CPU）：
+
+```bash
+pip install torch
+```
 
 ### 本地开发安装
 
@@ -38,12 +49,8 @@ python -m build
 ```python
 from stegokit import (
     StegoAlgorithm,
-    EncodeContext,
-    DecodeContext,
-    EncodeResult,
-    DecodeResult,
     StegoDispatcher,
-    AlgorithmRegistry,
+    StegoAlgorithmRegistry,
     PRG,
 )
 ```
@@ -63,65 +70,69 @@ from stegokit import (
 ## 快速使用
 
 ```python
-from stegokit import StegoAlgorithm, EncodeContext, DecodeContext, StegoDispatcher, PRG
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from stegokit import (
+    StegoAlgorithm,
+    StegoDispatcher,
+    PRG,
+)
 
+model = AutoModelForCausalLM.from_pretrained("your-model-path").eval()
+tokenizer = AutoTokenizer.from_pretrained("your-model-path")
 dispatcher = StegoDispatcher()
 
 prg = PRG.from_int_seed(11)
-
-prob_table = [0.42, 0.26, 0.18, 0.09, 0.05]
-indices = [10, 20, 30, 40, 50]
 bit_stream = "010111001101011010010111"
 
-enc = dispatcher.dispatch_encode(
-    EncodeContext(
-        algorithm=StegoAlgorithm.METEOR,
-        prob_table=prob_table,
-        indices=indices,
-        bit_stream=bit_stream,
-        bit_index=0,
-        precision=16,
-        prg=prg,
-    )
+enc = dispatcher.embed(
+    algorithm=StegoAlgorithm.METEOR,
+    model=model,
+    tokenizer=tokenizer,
+    prompt="写一段简短介绍",
+    secret_bits=bit_stream,
+    max_new_tokens=64,
+    temperature=1.0,
+    precision=16,
+    prg=prg,
 )
 
-dec = dispatcher.dispatch_decode(
-    DecodeContext(
-        algorithm=StegoAlgorithm.METEOR,
-        prob_table=prob_table,
-        indices=indices,
-        prev_token_id=enc.sampled_token_id,
-        precision=16,
-        prg=prg,
-    )
+dec = dispatcher.extract(
+    algorithm=StegoAlgorithm.METEOR,
+    model=model,
+    tokenizer=tokenizer,
+    prompt="写一段简短介绍",
+    generated_token_ids=enc.generated_token_ids,
+    precision=16,
+    prg=prg,
+    max_bits=enc.consumed_bits,
 )
 
-print(enc.sampled_token_id, enc.bits_consumed)
-print(dec.bits)
+print(enc.text)
+print(enc.consumed_bits)
+print(dec.bits == bit_stream[:enc.consumed_bits])
 ```
 
-## EncodeContext / DecodeContext 说明
+## 参数说明
 
-编码主要参数：
+`embed(...)` 主要参数：
 
 - `algorithm`: 算法标识（内置可传 `StegoAlgorithm` 或对应字符串；自定义传字符串）
-- `prob_table`: 当前步 token 概率分布
-- `indices`: 与 `prob_table` 一一对应的 token id
-- `bit_stream`: 待嵌入 bit 串
-- `bit_index`: 当前读取到的 bit 位置
+- `model` / `tokenizer`: 语言模型与分词器
+- `prompt`: 生成上下文
+- `secret_bits`: 待嵌入 bit 串
+- `max_new_tokens`: 最长生成长度
+- `temperature` / `top_k` / `top_p`: 采样控制
 - `precision`: 精度参数
 - `prg`: 随机生成器（部分算法必需）
-- `cur_interval`: 区间状态（如 AC）
 
-解码主要参数：
+`extract(...)` 主要参数：
 
 - `algorithm`
-- `prob_table`
-- `indices`
-- `prev_token_id`: 当前步生成的 token id
+- `generated_token_ids`: 已生成 token 序列
+- `prompt`: 与编码时保持一致
 - `precision`
 - `prg`
-- `cur_interval`
+- `max_bits`: 可选，限制最多解码 bit 数
 
 ## PRG 用法
 
@@ -143,7 +154,7 @@ prg = PRG.from_hex(
 
 说明：
 
-- `AC` 不依赖 PRG（传了也会被忽略，并在分发器打印 INFO）。
+- `AC` 不依赖 PRG（传了会被忽略）。
 - 其余已接入算法（discop/artifacts/meteor）依赖 PRG。
 
 ## 如何注册你自己的算法
@@ -158,22 +169,23 @@ prg = PRG.from_hex(
 示例：
 
 ```python
-from core.stego_algorithm import EncodeResult, DecodeResult
-from core.stego_context import EncodeContext, DecodeContext
+from core.stego_algorithm import StegoEncodeResult, StegoDecodeResult
+from core.stego_context import StegoEncodeContext, StegoDecodeContext
 
 
 class MyAlgoStrategy:
-    def encode(self, context: EncodeContext) -> EncodeResult:
+    def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
         # TODO: your logic
-        return EncodeResult(
-            sampled_token_id=context.indices[0],
-            bits_consumed=1,
-            metadata={"next_bit_index": context.bit_index},
+        return StegoEncodeResult(
+            generated_token_ids=[1, 2, 3],
+            consumed_bits=1,
+            text="demo",
+            metadata={},
         )
 
-    def decode(self, context: DecodeContext) -> DecodeResult:
+    def decode(self, context: StegoDecodeContext) -> StegoDecodeResult:
         # TODO: your logic
-        return DecodeResult(bits="0", metadata={})
+        return StegoDecodeResult(bits="0", metadata={})
 ```
 
 ### 第 2 步：运行时注册
@@ -191,7 +203,7 @@ dispatcher.registry.register("my_algo", MyAlgoStrategy())
 完成后，分发器就能直接调度你的算法：
 
 ```python
-dispatcher.dispatch_encode(EncodeContext(algorithm="my_algo", ...))
+dispatcher.dispatch_encode(StegoEncodeContext(algorithm="my_algo", ...))
 ```
 
 说明：
@@ -199,4 +211,3 @@ dispatcher.dispatch_encode(EncodeContext(algorithm="my_algo", ...))
 - 内置算法仍建议使用 `StegoAlgorithm`，保证调用侧稳定。
 - 自定义算法用字符串 key 注册与调用，避免修改 `stegokit` 包源码。
 - `register("my_algo", ...)` 的 key 不能与内置算法重名（如 `ac`、`meteor`）。
-

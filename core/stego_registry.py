@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import logging
 from typing import TypeAlias
 
 from algo.ac.ac import ACStrategy
+from algo.asymmetric.asymmetric import AsymmetricStrategy
 from algo.artifacts.binary_based import BinaryBasedStrategy
 from algo.artifacts.differential_based import DifferentialBasedStrategy
 from algo.artifacts.stability_based import StabilityBasedStrategy
@@ -11,29 +11,12 @@ from algo.discop.discop import DiscopStrategy
 from algo.discop.discop_base import DiscopBaseStrategy
 from algo.meteor.meteor import MeteorStrategy
 from core.algorithm_enum import StegoAlgorithm
-from core.stego_algorithm import DecodeResult, EncodeResult, StegoStrategy
-from core.stego_context import DecodeContext, EncodeContext
+from core.stego_algorithm import StegoStrategy
 
-logger = logging.getLogger(__name__)
 AlgorithmRef: TypeAlias = StegoAlgorithm | str
 
 
-class PlaceholderStrategy:
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def encode(self, context: EncodeContext) -> EncodeResult:
-        algo_name = context.algorithm.value if isinstance(context.algorithm, StegoAlgorithm) else str(context.algorithm)
-        logger.info(f"[{self._name}] encode placeholder only, algorithm not implemented yet.")
-        return EncodeResult(metadata={"algorithm": algo_name, "placeholder": True})
-
-    def decode(self, context: DecodeContext) -> DecodeResult:
-        algo_name = context.algorithm.value if isinstance(context.algorithm, StegoAlgorithm) else str(context.algorithm)
-        logger.info(f"[{self._name}] decode placeholder only, algorithm not implemented yet.")
-        return DecodeResult(metadata={"algorithm": algo_name, "placeholder": True})
-
-
-class AlgorithmRegistry:
+class StegoAlgorithmRegistry:
     def __init__(self) -> None:
         self._builtin_strategies: dict[StegoAlgorithm, StegoStrategy] = {}
         self._custom_strategies: dict[str, StegoStrategy] = {}
@@ -79,7 +62,7 @@ class AlgorithmRegistry:
         return strategy
 
     @classmethod
-    def default(cls) -> "AlgorithmRegistry":
+    def default(cls) -> "StegoAlgorithmRegistry":
         registry = cls()
         registry._register_builtin(StegoAlgorithm.AC, ACStrategy())
         registry._register_builtin(StegoAlgorithm.DISCOP, DiscopStrategy())
@@ -88,4 +71,5 @@ class AlgorithmRegistry:
         registry._register_builtin(StegoAlgorithm.BINARY_BASED, BinaryBasedStrategy())
         registry._register_builtin(StegoAlgorithm.STABILITY_BASED, StabilityBasedStrategy())
         registry._register_builtin(StegoAlgorithm.METEOR, MeteorStrategy())
+        registry._register_builtin(StegoAlgorithm.ASYMMETRIC, AsymmetricStrategy())
         return registry

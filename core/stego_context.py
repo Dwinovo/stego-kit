@@ -4,28 +4,36 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from core.algorithm_enum import StegoAlgorithm
+from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 
 @dataclass
-class EncodeContext:
+class StegoEncodeContext:
     algorithm: StegoAlgorithm | str
-    prob_table: Sequence[float]
-    indices: Sequence[int]
-    bit_stream: str
-    bit_index: int = 0
+    model: PreTrainedModel
+    tokenizer: PreTrainedTokenizerBase
+    secret_bits: str
+    prompt: str | None = None
+    max_new_tokens: int = 128
+    temperature: float = 1.0
+    top_k: int | None = None
+    top_p: float | None = None
     precision: int = 52
     prg: Any | None = None
-    cur_interval: list[int] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class DecodeContext:
+class StegoDecodeContext:
     algorithm: StegoAlgorithm | str
-    prob_table: Sequence[float]
-    indices: Sequence[int]
-    prev_token_id: int
+    model: PreTrainedModel
+    tokenizer: PreTrainedTokenizerBase
+    generated_token_ids: Sequence[int]
+    prompt: str | None = None
+    temperature: float = 1.0
+    top_k: int | None = None
+    top_p: float | None = None
     precision: int = 52
     prg: Any | None = None
-    cur_interval: list[int] | None = None
+    max_bits: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)

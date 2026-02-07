@@ -1,136 +1,158 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from core.algorithm_enum import StegoAlgorithm
-from core.stego_algorithm import DecodeResult, EncodeResult
-from core.stego_context import DecodeContext, EncodeContext
-from core.stego_registry import AlgorithmRegistry
+from core.stego_algorithm import (
+    StegoDecodeResult,
+    StegoEncodeResult,
+)
+from core.stego_context import StegoDecodeContext, StegoEncodeContext
+from core.stego_registry import StegoAlgorithmRegistry
+from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 logger = logging.getLogger(__name__)
 
 
 class StegoDispatcher:
-    """Thin orchestrator: validate context, resolve strategy, execute."""
+    """Dispatcher for model-in-the-loop steganography."""
 
-    def __init__(self, registry: AlgorithmRegistry | None = None, verbose: bool = True) -> None:
-        self._registry = registry or AlgorithmRegistry.default()
+    def __init__(self, registry: StegoAlgorithmRegistry | None = None, verbose: bool = True) -> None:
+        self._registry = registry or StegoAlgorithmRegistry.default()
         self._verbose = verbose
 
     @property
-    def registry(self) -> AlgorithmRegistry:
+    def registry(self) -> StegoAlgorithmRegistry:
         return self._registry
 
-    def dispatch_encode(self, context: EncodeContext) -> EncodeResult:
+    def dispatch_encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
         self._validate_encode_context(context)
         strategy = self._registry.get(context.algorithm)
-        builtin_algo = self._resolve_builtin_algorithm(context.algorithm)
-        algo_name = self._algorithm_name(context.algorithm, builtin_algo)
-        self._info_if_prg_ignored(builtin_algo, context.prg)
-
         if self._verbose:
-            preview = list(context.prob_table[:5])
             logger.info(
-                f"[Encode Dispatcher] algorithm={algo_name}, prob_table_size={len(context.prob_table)}, "
-                f"indices_size={len(context.indices)}, bit_index={context.bit_index}, precision={context.precision}, "
-                f"preview={preview}"
+                f"[Stego Encode] algorithm={context.algorithm}, max_new_tokens={context.max_new_tokens}, "
+                f"secret_bits_len={len(context.secret_bits)}, precision={context.precision}"
             )
-
         return strategy.encode(context)
 
-    def dispatch_decode(self, context: DecodeContext) -> DecodeResult:
+    def dispatch_decode(self, context: StegoDecodeContext) -> StegoDecodeResult:
         self._validate_decode_context(context)
         strategy = self._registry.get(context.algorithm)
-        builtin_algo = self._resolve_builtin_algorithm(context.algorithm)
-        algo_name = self._algorithm_name(context.algorithm, builtin_algo)
-        self._info_if_prg_ignored(builtin_algo, context.prg)
-
         if self._verbose:
-            preview = list(context.prob_table[:5])
             logger.info(
-                f"[Decode Dispatcher] algorithm={algo_name}, prob_table_size={len(context.prob_table)}, "
-                f"indices_size={len(context.indices)}, prev_token_id={context.prev_token_id}, "
-                f"precision={context.precision}, preview={preview}"
+                f"[Stego Decode] algorithm={context.algorithm}, generated_steps={len(context.generated_token_ids)}, "
+                f"precision={context.precision}, max_bits={context.max_bits}"
             )
-
         return strategy.decode(context)
 
     @staticmethod
-    def _validate_encode_context(context: EncodeContext) -> None:
-        if not context.prob_table:
-            raise ValueError("prob_table cannot be empty")
-        if not context.indices:
-            raise ValueError("indices cannot be empty")
+    def _validate_encode_context(context: StegoEncodeContext) -> None:
+        if context.model is None:
+            raise ValueError("model cannot be None")
+        if context.tokenizer is None:
+            raise ValueError("tokenizer cannot be None")
+        if not hasattr(context.model, "__call__"):
+            raise TypeError("model must be callable like transformers causal LM")
+        if not hasattr(context.tokenizer, "__call__") or not hasattr(context.tokenizer, "decode"):
+            raise TypeError("tokenizer must implement __call__ and decode")
+        if not isinstance(context.secret_bits, str):
+            raise TypeError("secret_bits must be a string of 0/1")
+        if set(context.secret_bits) - {"0", "1"}:
+            raise ValueError("secret_bits must contain only '0' and '1'")
+        if context.max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be positive")
+        if context.precision <= 0:
+            raise ValueError("precision must be positive")
+        if context.temperature <= 0:
+            raise ValueError("temperature must be > 0")
+        if context.top_k is not None and context.top_k <= 0:
+            raise ValueError("top_k must be positive")
+        if context.top_p is not None and not (0 < context.top_p <= 1):
+            raise ValueError("top_p must be in (0, 1]")
 
-    @staticmethod
-    def _validate_decode_context(context: DecodeContext) -> None:
-        if not context.prob_table:
-            raise ValueError("prob_table cannot be empty")
-        if not context.indices:
-            raise ValueError("indices cannot be empty")
-
-    def _info_if_prg_ignored(self, algo: StegoAlgorithm | None, prg: Any) -> None:
-        if self._verbose and algo == StegoAlgorithm.AC and prg is not None:
-            logger.info("[INFO] AC does not use PRG; `context.prg` is ignored.")
-
-    @staticmethod
-    def _resolve_builtin_algorithm(algorithm: StegoAlgorithm | str) -> StegoAlgorithm | None:
-        if isinstance(algorithm, StegoAlgorithm):
-            return algorithm
-        try:
-            return StegoAlgorithm(algorithm.strip().lower())
-        except ValueError:
-            return None
-
-    @staticmethod
-    def _algorithm_name(algorithm: StegoAlgorithm | str, builtin: StegoAlgorithm | None) -> str:
-        if builtin is not None:
-            return builtin.value
-        return algorithm.strip().lower() if isinstance(algorithm, str) else str(algorithm)
-
-
-if __name__ == "__main__":
-    class DemoPRG:
-        def __init__(self, seed: int = 1) -> None:
-            self.v = seed
-
-        def generate_random(self, n):
-            self.v = (1103515245 * self.v + 12345) % (2**31)
-            return (self.v % 1000000) / 1000000.0
-
-    dispatcher = StegoDispatcher()
-    demo_prob_table = [0.42, 0.26, 0.18, 0.09, 0.05]
-    demo_indices = [10, 20, 30, 40, 50]
-
-    logger.info("=== Dispatcher Demo Start ===")
-    for algo in (
-        StegoAlgorithm.AC,
-        StegoAlgorithm.DISCOP,
-        StegoAlgorithm.DIFFERENTIAL_BASED,
-        StegoAlgorithm.METEOR,
-    ):
-        logger.info(f"\n--- encode test {algo.value} ---")
-        dispatcher.dispatch_encode(
-            EncodeContext(
-                algorithm=algo,
-                prob_table=demo_prob_table,
-                indices=demo_indices,
-                bit_stream="010101011001",
-                bit_index=0,
-                precision=16,
-                prg=DemoPRG(seed=7),
-            )
+    def embed(
+        self,
+        *,
+        algorithm: StegoAlgorithm | str,
+        model: PreTrainedModel,
+        tokenizer: PreTrainedTokenizerBase,
+        secret_bits: str,
+        prompt: str | None = None,
+        max_new_tokens: int = 128,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        precision: int = 52,
+        prg: Any | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> StegoEncodeResult:
+        ctx = StegoEncodeContext(
+            algorithm=algorithm,
+            model=model,
+            tokenizer=tokenizer,
+            secret_bits=secret_bits,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            precision=precision,
+            prg=prg,
+            extra=extra or {},
         )
-        logger.info(f"--- decode test {algo.value} ---")
-        dispatcher.dispatch_decode(
-            DecodeContext(
-                algorithm=algo,
-                prob_table=demo_prob_table,
-                indices=demo_indices,
-                prev_token_id=20,
-                precision=16,
-                prg=DemoPRG(seed=7),
-            )
+        return self.dispatch_encode(ctx)
+
+    def extract(
+        self,
+        *,
+        algorithm: StegoAlgorithm | str,
+        model: PreTrainedModel,
+        tokenizer: PreTrainedTokenizerBase,
+        generated_token_ids: Sequence[int],
+        prompt: str | None = None,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        precision: int = 52,
+        prg: Any | None = None,
+        max_bits: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> StegoDecodeResult:
+        ctx = StegoDecodeContext(
+            algorithm=algorithm,
+            model=model,
+            tokenizer=tokenizer,
+            generated_token_ids=generated_token_ids,
+            prompt=prompt,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            precision=precision,
+            prg=prg,
+            max_bits=max_bits,
+            extra=extra or {},
         )
-    logger.info("\n=== Dispatcher Demo End ===")
+        return self.dispatch_decode(ctx)
+
+    @staticmethod
+    def _validate_decode_context(context: StegoDecodeContext) -> None:
+        if context.model is None:
+            raise ValueError("model cannot be None")
+        if context.tokenizer is None:
+            raise ValueError("tokenizer cannot be None")
+        if not hasattr(context.model, "__call__"):
+            raise TypeError("model must be callable like transformers causal LM")
+        if not hasattr(context.tokenizer, "__call__") or not hasattr(context.tokenizer, "decode"):
+            raise TypeError("tokenizer must implement __call__ and decode")
+        if context.precision <= 0:
+            raise ValueError("precision must be positive")
+        if context.max_bits is not None and context.max_bits < 0:
+            raise ValueError("max_bits must be >= 0")
+        if context.temperature <= 0:
+            raise ValueError("temperature must be > 0")
+        if context.top_k is not None and context.top_k <= 0:
+            raise ValueError("top_k must be positive")
+        if context.top_p is not None and not (0 < context.top_p <= 1):
+            raise ValueError("top_p must be in (0, 1]")
