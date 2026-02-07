@@ -3,14 +3,14 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "stegokit"
+name = "StegoKit"
 version = "0.1.0"
 description = "A modular toolkit for generative steganography algorithms."
 readme = "README.md"
 requires-python = ">=3.10"
-license = "UNLICENSED"
+license = "MIT"
 authors = [
-  { name = "stegokit contributors" }
+  { name = "StegoKit contributors" }
 ]
 dependencies = [
   "torch>=2.1"
