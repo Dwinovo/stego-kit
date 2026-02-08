@@ -13,7 +13,7 @@ class StegoEncodeContext:
     model: PreTrainedModel
     tokenizer: PreTrainedTokenizerBase
     secret_bits: str
-    prompt: str | None = None
+    messages: list[dict[str, Any]] = field(default_factory=list)
     max_new_tokens: int = 128
     temperature: float = 1.0
     top_k: int | None = None
@@ -29,7 +29,7 @@ class StegoDecodeContext:
     model: PreTrainedModel
     tokenizer: PreTrainedTokenizerBase
     generated_token_ids: Sequence[int]
-    prompt: str | None = None
+    messages: list[dict[str, Any]] = field(default_factory=list)
     temperature: float = 1.0
     top_k: int | None = None
     top_p: float | None = None

@@ -21,7 +21,7 @@ class ACStrategy:
     """Arithmetic-coding-based steganography strategy."""
 
     def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
-        prefix_ids = _prepare_prefix_ids(context.prompt, context.model, context.tokenizer)
+        prefix_ids = _prepare_prefix_ids(context.messages, context.model, context.tokenizer)
         x = prefix_ids
         past_key_values = None
         bit_index = 0
@@ -78,7 +78,7 @@ class ACStrategy:
         if not context.generated_token_ids:
             return StegoDecodeResult(bits="", metadata={"decoded_steps": 0})
 
-        prefix_ids = _prepare_prefix_ids(context.prompt, context.model, context.tokenizer)
+        prefix_ids = _prepare_prefix_ids(context.messages, context.model, context.tokenizer)
         x = prefix_ids
         past_key_values = None
         cur_interval = None

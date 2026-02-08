@@ -61,6 +61,17 @@ class StegoDispatcher:
             raise TypeError("secret_bits must be a string of 0/1")
         if set(context.secret_bits) - {"0", "1"}:
             raise ValueError("secret_bits must contain only '0' and '1'")
+        if not isinstance(context.messages, list):
+            raise TypeError("messages must be a list of message dicts")
+        if len(context.messages) == 0:
+            raise ValueError("messages cannot be empty")
+        for i, msg in enumerate(context.messages):
+            if not isinstance(msg, dict):
+                raise TypeError(f"messages[{i}] must be a dict")
+            if "role" not in msg:
+                raise ValueError(f"messages[{i}] missing required key: role")
+            if "content" not in msg and "tool_calls" not in msg:
+                raise ValueError(f"messages[{i}] must contain content or tool_calls")
         if context.max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
         if context.precision <= 0:
@@ -79,7 +90,7 @@ class StegoDispatcher:
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizerBase,
         secret_bits: str,
-        prompt: str | None = None,
+        messages: Sequence[dict[str, Any]],
         max_new_tokens: int = 128,
         temperature: float = 1.0,
         top_k: int | None = None,
@@ -93,7 +104,7 @@ class StegoDispatcher:
             model=model,
             tokenizer=tokenizer,
             secret_bits=secret_bits,
-            prompt=prompt,
+            messages=list(messages),
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_k=top_k,
@@ -111,7 +122,7 @@ class StegoDispatcher:
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizerBase,
         generated_token_ids: Sequence[int],
-        prompt: str | None = None,
+        messages: Sequence[dict[str, Any]],
         temperature: float = 1.0,
         top_k: int | None = None,
         top_p: float | None = None,
@@ -125,7 +136,7 @@ class StegoDispatcher:
             model=model,
             tokenizer=tokenizer,
             generated_token_ids=generated_token_ids,
-            prompt=prompt,
+            messages=list(messages),
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
@@ -146,6 +157,17 @@ class StegoDispatcher:
             raise TypeError("model must be callable like transformers causal LM")
         if not hasattr(context.tokenizer, "__call__") or not hasattr(context.tokenizer, "decode"):
             raise TypeError("tokenizer must implement __call__ and decode")
+        if not isinstance(context.messages, list):
+            raise TypeError("messages must be a list of message dicts")
+        if len(context.messages) == 0:
+            raise ValueError("messages cannot be empty")
+        for i, msg in enumerate(context.messages):
+            if not isinstance(msg, dict):
+                raise TypeError(f"messages[{i}] must be a dict")
+            if "role" not in msg:
+                raise ValueError(f"messages[{i}] missing required key: role")
+            if "content" not in msg and "tool_calls" not in msg:
+                raise ValueError(f"messages[{i}] must contain content or tool_calls")
         if context.precision <= 0:
             raise ValueError("precision must be positive")
         if context.max_bits is not None and context.max_bits < 0:

@@ -82,10 +82,21 @@ def _model_device(model) -> torch.device:
         return torch.device("cpu")
 
 
-def _prepare_prefix_ids(context_prompt: str | None, model, tokenizer) -> torch.Tensor:
+def _prepare_prefix_ids(context_messages: Sequence[dict[str, Any]], model, tokenizer) -> torch.Tensor:
     device = _model_device(model)
-    prompt = context_prompt or ""
-    return tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    if not hasattr(tokenizer, "apply_chat_template"):
+        raise ValueError("tokenizer must support apply_chat_template")
+    input_ids = tokenizer.apply_chat_template(
+        list(context_messages),
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    )
+    if not isinstance(input_ids, torch.Tensor):
+        input_ids = torch.tensor(input_ids, dtype=torch.long)
+    if input_ids.dim() == 1:
+        input_ids = input_ids.unsqueeze(0)
+    return input_ids.to(device)
 
 
 def _filter_distribution(

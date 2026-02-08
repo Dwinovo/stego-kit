@@ -39,14 +39,7 @@ class AsymmetricStrategy:
 
     @staticmethod
     def _prepare_prompt_ids(context: StegoEncodeContext | StegoDecodeContext) -> torch.Tensor:
-        use_chat_template = bool(context.extra.get("use_chat_template", False)) if context.extra else False
-        prompt = context.prompt or ""
-        if use_chat_template and hasattr(context.tokenizer, "apply_chat_template"):
-            messages = [{"role": "user", "content": prompt}]
-            return context.tokenizer.apply_chat_template(
-                messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
-            ).to(context.model.device)
-        return _prepare_prefix_ids(prompt, context.model, context.tokenizer)
+        return _prepare_prefix_ids(context.messages, context.model, context.tokenizer)
 
     @staticmethod
     def _interval_sum(probs: torch.Tensor, start: int, end: int) -> float:
@@ -84,13 +77,11 @@ class AsymmetricStrategy:
         if len(context.secret_bits) == 0:
             return StegoEncodeResult(generated_token_ids=[], consumed_bits=0, text="", metadata={"algorithm": context.algorithm})
 
+        secret_len = len(context.secret_bits)
         current_bit = context.secret_bits[0]
 
         with torch.no_grad():
             for _ in range(context.max_new_tokens):
-                if bit_cnt >= len(context.secret_bits):
-                    break
-
                 output = context.model(input_ids=x, past_key_values=past_key_values, use_cache=True)
                 logits = output.logits[0, -1, :]
                 past_key_values = getattr(output, "past_key_values", None)
@@ -101,9 +92,6 @@ class AsymmetricStrategy:
                 split = 2 ** (length - 1)
 
                 for _ in range(length):
-                    if bit_cnt >= len(context.secret_bits):
-                        break
-
                     random.seed(seed + str(cnt_v))
                     random_number = random.random()
 
@@ -113,7 +101,7 @@ class AsymmetricStrategy:
                     if total_mass <= 0:
                         break
 
-                    current_bit = context.secret_bits[bit_cnt]
+                    current_bit = context.secret_bits[bit_cnt] if bit_cnt < secret_len else "0"
                     left_ratio = left_mass / total_mass
                     right_ratio = right_mass / total_mass
 
@@ -148,7 +136,7 @@ class AsymmetricStrategy:
                     step_scores.append(entropy_acc)
 
                     # Same stop rule as demo: confirm one secret bit and move to next segment.
-                    if crit <= threshold and delta * (0.5 - int(current_bit)) >= 0:
+                    if bit_cnt < secret_len and crit <= threshold and delta * (0.5 - int(current_bit)) >= 0:
                         seed = seed + "a"
                         sum_v = 0.0
                         cnt_v = 0
