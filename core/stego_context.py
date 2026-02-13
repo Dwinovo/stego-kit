@@ -20,6 +20,7 @@ class StegoEncodeContext:
     top_p: float | None = None
     precision: int = 52
     prg: Any | None = None
+    stop_on_eos: bool | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 

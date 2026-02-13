@@ -86,17 +86,49 @@ def _prepare_prefix_ids(context_messages: Sequence[dict[str, Any]], model, token
     device = _model_device(model)
     if not hasattr(tokenizer, "apply_chat_template"):
         raise ValueError("tokenizer must support apply_chat_template")
-    input_ids = tokenizer.apply_chat_template(
+
+    rendered = tokenizer.apply_chat_template(
         list(context_messages),
         tokenize=True,
         add_generation_prompt=True,
         return_tensors="pt",
     )
-    if not isinstance(input_ids, torch.Tensor):
-        input_ids = torch.tensor(input_ids, dtype=torch.long)
+
+    # v5 常见：BatchEncoding / dict-like
+    if hasattr(rendered, "get"):
+        input_ids = rendered.get("input_ids")
+        if input_ids is None:
+            raise ValueError("apply_chat_template output has no input_ids")
+        if not isinstance(input_ids, torch.Tensor):
+            input_ids = torch.tensor(input_ids, dtype=torch.long)
+
+    # 直接 Tensor
+    elif isinstance(rendered, torch.Tensor):
+        input_ids = rendered
+
+    # list[int] / list[list[int]]
+    elif isinstance(rendered, (list, tuple)):
+        input_ids = torch.tensor(rendered, dtype=torch.long)
+
+    # 极端兜底：返回了 str（或被上游改成字符串）
+    elif isinstance(rendered, str):
+        enc = tokenizer(rendered, return_tensors="pt")
+        input_ids = enc["input_ids"]
+
+    else:
+        raise TypeError(f"Unsupported apply_chat_template output type: {type(rendered)}")
+
     if input_ids.dim() == 1:
         input_ids = input_ids.unsqueeze(0)
-    return input_ids.to(device)
+
+    return input_ids.to(device=device, dtype=torch.long)
+
+
+def _stop_on_eos(context, default: bool) -> bool:
+    """Resolve stop-on-eos preference from context with a per-algorithm default."""
+    if getattr(context, "stop_on_eos", None) is not None:
+        return bool(getattr(context, "stop_on_eos"))
+    return default
 
 
 def _filter_distribution(

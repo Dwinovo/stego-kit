@@ -82,6 +82,8 @@ class StegoDispatcher:
             raise ValueError("top_k must be positive")
         if context.top_p is not None and not (0 < context.top_p <= 1):
             raise ValueError("top_p must be in (0, 1]")
+        if context.stop_on_eos is not None and not isinstance(context.stop_on_eos, bool):
+            raise TypeError("stop_on_eos must be bool or None")
 
     def embed(
         self,
@@ -97,6 +99,7 @@ class StegoDispatcher:
         top_p: float | None = None,
         precision: int = 52,
         prg: Any | None = None,
+        stop_on_eos: bool | None = None,
         extra: dict[str, Any] | None = None,
     ) -> StegoEncodeResult:
         ctx = StegoEncodeContext(
@@ -111,6 +114,7 @@ class StegoDispatcher:
             top_p=top_p,
             precision=precision,
             prg=prg,
+            stop_on_eos=stop_on_eos,
             extra=extra or {},
         )
         return self.dispatch_encode(ctx)

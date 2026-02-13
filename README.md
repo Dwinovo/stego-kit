@@ -154,6 +154,7 @@ python main.py
 - `temperature`, `top_k`, `top_p`: 采样控制
 - `precision`: 隐写相关精度参数（>0）
 - `prg`: 可选伪随机源对象（某些算法必须）
+- `stop_on_eos`: 是否在生成到 `eos_token` 时停止（`None` 表示使用算法默认策略）
 - `extra`: 算法特定参数字典
 
 ### Asymmetric 的 `extra` 参数

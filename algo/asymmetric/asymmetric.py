@@ -7,7 +7,7 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 
-from algo.common import _prepare_prefix_ids
+from algo.common import _prepare_prefix_ids, _stop_on_eos
 from core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
 from core.stego_context import StegoDecodeContext, StegoEncodeContext
 
@@ -20,7 +20,7 @@ class AsymmetricStrategy:
         if func_type == 0:
             return np.cos(np.pi * x)
         if func_type == 1:
-            return -np.sign(x - 0.5)
+            return np.sign(0.5 - x)
         if func_type == 2:
             return np.log2(2 - x) - 0.5573
         raise ValueError(f"Unsupported func_type: {func_type}")
@@ -58,11 +58,11 @@ class AsymmetricStrategy:
 
         threshold = 2 ** (-secure_parameter)
         length = self._bit_length(context.tokenizer)
-        vocab_size = int(context.tokenizer.vocab_size)
-
         prompt_ids = self._prepare_prompt_ids(context)
         x = prompt_ids
         past_key_values = None
+        eos_token_id = getattr(context.tokenizer, "eos_token_id", None)
+        stop_on_eos = _stop_on_eos(context, default=False)
         eos_token_id = getattr(context.tokenizer, "eos_token_id", None)
 
         generated_ids: list[int] = []
@@ -74,9 +74,6 @@ class AsymmetricStrategy:
         step_scores: list[float] = []
         entropy_acc = 0.0
 
-        if len(context.secret_bits) == 0:
-            return StegoEncodeResult(generated_token_ids=[], consumed_bits=0, text="", metadata={"algorithm": context.algorithm})
-
         secret_len = len(context.secret_bits)
         current_bit = context.secret_bits[0]
 
@@ -85,7 +82,7 @@ class AsymmetricStrategy:
                 output = context.model(input_ids=x, past_key_values=past_key_values, use_cache=True)
                 logits = output.logits[0, -1, :]
                 past_key_values = getattr(output, "past_key_values", None)
-                probs = torch.softmax(logits / max(float(context.temperature), 1e-8), dim=-1)
+                probs = torch.softmax(logits / float(context.temperature), dim=-1)
 
                 group_left = 0
                 group_right = 2 ** length
@@ -98,10 +95,7 @@ class AsymmetricStrategy:
                     left_mass = self._interval_sum(probs, group_left, split)
                     right_mass = self._interval_sum(probs, split, group_right)
                     total_mass = left_mass + right_mass
-                    if total_mass <= 0:
-                        break
 
-                    current_bit = context.secret_bits[bit_cnt] if bit_cnt < secret_len else "0"
                     left_ratio = left_mass / total_mass
                     right_ratio = right_mass / total_mass
 
@@ -109,23 +103,23 @@ class AsymmetricStrategy:
                         if random_number <= left_ratio:
                             next_bit = "0"
                             sum_v += float(self._sampling_function(random_number, func_type))
-                            entropy_acc += -math.log(max(left_ratio, 1e-12))
+                            entropy_acc += -math.log(left_ratio)
                             group_right = split
                         else:
                             next_bit = "1"
                             sum_v += float(self._sampling_function(1 - random_number, func_type))
-                            entropy_acc += -math.log(max(right_ratio, 1e-12))
+                            entropy_acc += -math.log(right_ratio)
                             group_left = split
                     else:
                         if random_number <= right_ratio:
                             next_bit = "1"
                             sum_v += float(self._sampling_function(1 - random_number, func_type))
-                            entropy_acc += -math.log(max(right_ratio, 1e-12))
+                            entropy_acc += -math.log(right_ratio)
                             group_left = split
                         else:
                             next_bit = "0"
                             sum_v += float(self._sampling_function(random_number, func_type))
-                            entropy_acc += -math.log(max(left_ratio, 1e-12))
+                            entropy_acc += -math.log(left_ratio)
                             group_right = split
 
                     cnt_v += 1
@@ -136,20 +130,21 @@ class AsymmetricStrategy:
                     step_scores.append(entropy_acc)
 
                     # Same stop rule as demo: confirm one secret bit and move to next segment.
-                    if bit_cnt < secret_len and crit <= threshold and delta * (0.5 - int(current_bit)) >= 0:
+                    if crit <= threshold and delta * (0.5 - int(current_bit)) >= 0:
                         seed = seed + "a"
                         sum_v = 0.0
                         cnt_v = 0
                         bit_cnt += 1
+                        current_bit = context.secret_bits[bit_cnt]
                         segments.append(segment)
                         segment = ""
 
-                token_id = max(0, min(int(group_left), vocab_size - 1))
+                token_id = int(group_left)
                 generated_ids.append(token_id)
                 x = torch.tensor([[token_id]], device=prompt_ids.device, dtype=torch.long)
-
-                if eos_token_id is not None and token_id == int(eos_token_id):
+                if stop_on_eos and eos_token_id is not None and token_id == int(eos_token_id):
                     break
+
 
         text = context.tokenizer.decode(generated_ids)
         consumed = min(bit_cnt, len(context.secret_bits))

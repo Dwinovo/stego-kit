@@ -45,3 +45,6 @@ logs/
 tmp/
 temp/
 *.tmp
+
+.gradio
+test/

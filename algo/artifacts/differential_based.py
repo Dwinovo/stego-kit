@@ -4,7 +4,7 @@ from typing import Any, Sequence
 
 import torch
 
-from algo.common import _filter_distribution, _prepare_prefix_ids
+from algo.common import _filter_distribution, _prepare_prefix_ids, _stop_on_eos
 from .common import ArtifactsCommonMixin
 from core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
 from core.stego_context import StegoDecodeContext, StegoEncodeContext
@@ -18,6 +18,7 @@ class DifferentialBasedStrategy(ArtifactsCommonMixin):
         bit_index = 0
         cur_interval = None
         eos_token_id = getattr(context.tokenizer, "eos_token_id", None)
+        stop_on_eos = _stop_on_eos(context, default=True)
         generated_ids: list[int] = []
 
         for _ in range(context.max_new_tokens):
@@ -47,7 +48,7 @@ class DifferentialBasedStrategy(ArtifactsCommonMixin):
             cur_interval = er.get("cur_interval", cur_interval)
             x = torch.tensor([[token_id]], device=prefix_ids.device, dtype=torch.long)
 
-            if eos_token_id is not None and token_id == int(eos_token_id):
+            if stop_on_eos and eos_token_id is not None and token_id == int(eos_token_id):
                 break
 
         text = context.tokenizer.decode(generated_ids)
