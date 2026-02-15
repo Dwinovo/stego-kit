@@ -3,7 +3,7 @@
 StegoKit 是一个面向大语言模型（LLM）的生成式隐写工具包，提供统一的编码/解码调度接口，并内置多种经典隐写策略实现。
 
 项目核心目标：
-- 统一不同隐写算法的调用方式（同一套 `embed` / `extract` API）
+- 统一不同隐写算法的调用方式（同一套上下文结构 + 分发接口）
 - 便于研究和复现实验（可控随机源、可切换策略、可扩展注册）
 - 兼容 Hugging Face `transformers` 因果语言模型推理流程
 
@@ -68,12 +68,18 @@ pip install -e .
 
 ## 快速开始
 
-### 1) 基础用法（统一 API）
+### 1) 基础用法（构建上下文 + 分发器）
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from stegokit import StegoAlgorithm, StegoDispatcher, PRG
+from stegokit import (
+    PRG,
+    StegoAlgorithm,
+    StegoDecodeContext,
+    StegoDispatcher,
+    StegoEncodeContext,
+)
 
 model_name = "gpt2"  # 示例模型，实际可替换为你自己的 CausalLM
 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -83,10 +89,9 @@ if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
     tokenizer.pad_token = tokenizer.eos_token
 
 dispatcher = StegoDispatcher(verbose=True)
-prg = PRG.from_int_seed(2026)
 messages = [{"role": "user", "content": "Write a short paragraph about privacy."}]
 
-enc = dispatcher.embed(
+enc_ctx = StegoEncodeContext(
     algorithm=StegoAlgorithm.AC,
     model=model,
     tokenizer=tokenizer,
@@ -96,11 +101,12 @@ enc = dispatcher.embed(
     temperature=1.0,
     top_k=50,
     precision=16,
-    prg=prg,  # AC 可不传；部分算法必须传（见下表）
+    prg=PRG.from_int_seed(2026),  # AC 可不传；部分算法必须传（见下表）
 )
+enc = dispatcher.dispatch_encode(enc_ctx)
 
 # 解码时必须保持同样的模型与采样参数
-dec = dispatcher.extract(
+dec_ctx = StegoDecodeContext(
     algorithm=StegoAlgorithm.AC,
     model=model,
     tokenizer=tokenizer,
@@ -112,6 +118,7 @@ dec = dispatcher.extract(
     max_bits=enc.consumed_bits,
     prg=PRG.from_int_seed(2026),
 )
+dec = dispatcher.dispatch_decode(dec_ctx)
 
 print("generated:", enc.text)
 print("embedded bits:", enc.consumed_bits)
@@ -151,7 +158,7 @@ python main.py
 
 ## 参数说明
 
-### 通用参数（`embed` / `extract`）
+### 通用字段（`StegoEncodeContext` / `StegoDecodeContext`）
 
 - `algorithm`: `StegoAlgorithm` 枚举或自定义算法名字符串
 - `model`, `tokenizer`: Hugging Face 因果 LM 与对应 tokenizer
@@ -161,6 +168,8 @@ python main.py
 - `prg`: 可选伪随机源对象（某些算法必须）
 - `stop_on_eos`: 是否在生成到 `eos_token` 时停止（`None` 表示使用算法默认策略）
 - `extra`: 算法特定参数字典
+
+说明：`embed` / `extract` 仍可用，它们本质上是对上下文构建 + `dispatch_encode` / `dispatch_decode` 的便捷封装。
 
 ### Asymmetric 的 `extra` 参数
 
