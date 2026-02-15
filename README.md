@@ -12,8 +12,8 @@ StegoKit 是一个面向大语言模型（LLM）的生成式隐写工具包，�
 - 统一调度器：`StegoDispatcher`
 - 内置 8 种算法策略：`AC / DISCOP / DISCOP_BASE / METEOR / ASYMMETRIC / DIFFERENTIAL_BASED / BINARY_BASED / STABILITY_BASED`
 - 标准结果对象：
-  - `StegoEncodeResult`（`generated_token_ids`、`consumed_bits`、`text`、`metadata`）
-  - `StegoDecodeResult`（`bits`、`metadata`）
+  - `StegoEncodeResult`（`generated_token_ids`、`consumed_bits`、`text`、`average_entropy`、`encode_time_seconds`、`embedding_capacity`、`metadata`）
+  - `StegoDecodeResult`（`bits`、`decode_time_seconds`、`metadata`）
 - 可插拔随机源：支持传入 `PRG`（`utils/prg.py`）
 - 可扩展算法注册：支持自定义策略并通过注册表调用
 
@@ -84,13 +84,14 @@ if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
 
 dispatcher = StegoDispatcher(verbose=True)
 prg = PRG.from_int_seed(2026)
+messages = [{"role": "user", "content": "Write a short paragraph about privacy."}]
 
 enc = dispatcher.embed(
     algorithm=StegoAlgorithm.AC,
     model=model,
     tokenizer=tokenizer,
     secret_bits="010101001011",
-    prompt="Write a short paragraph about privacy.",
+    messages=messages,
     max_new_tokens=64,
     temperature=1.0,
     top_k=50,
@@ -104,7 +105,7 @@ dec = dispatcher.extract(
     model=model,
     tokenizer=tokenizer,
     generated_token_ids=enc.generated_token_ids,
-    prompt="Write a short paragraph about privacy.",
+    messages=messages,
     temperature=1.0,
     top_k=50,
     precision=16,
@@ -114,7 +115,11 @@ dec = dispatcher.extract(
 
 print("generated:", enc.text)
 print("embedded bits:", enc.consumed_bits)
+print("avg entropy(bits):", enc.average_entropy)
+print("encode time(s):", enc.encode_time_seconds)
+print("capacity(bit/token):", enc.embedding_capacity)
 print("decoded bits:", dec.bits)
+print("decode time(s):", dec.decode_time_seconds)
 ```
 
 ### 2) 运行项目内置 demo（非对称算法）
@@ -150,7 +155,7 @@ python main.py
 
 - `algorithm`: `StegoAlgorithm` 枚举或自定义算法名字符串
 - `model`, `tokenizer`: Hugging Face 因果 LM 与对应 tokenizer
-- `prompt`: 上下文提示词
+- `messages`: 对话消息列表（每项至少包含 `role`，并包含 `content` 或 `tool_calls`）
 - `temperature`, `top_k`, `top_p`: 采样控制
 - `precision`: 隐写相关精度参数（>0）
 - `prg`: 可选伪随机源对象（某些算法必须）
@@ -162,7 +167,6 @@ python main.py
 - `seed`（默认 `"12345"`）
 - `secure_parameter`（默认 `32`）
 - `func_type`（默认 `0`，支持 `0/1/2`）
-- `use_chat_template`（默认 `False`）
 - 解码额外参数：
   - `decode_mode`: `"regular"` 或 `"robust"`
   - `robust_search_window`（默认 `1000`，仅 robust 模式）
@@ -173,10 +177,14 @@ python main.py
 - `generated_token_ids`: 生成的 token id 序列
 - `consumed_bits`: 实际嵌入的 bit 数
 - `text`: 解码后的文本
+- `average_entropy`: 生成过程中每个 token 候选分布的平均 Shannon 熵（bit）
+- `encode_time_seconds`: 编码耗时（秒）
+- `embedding_capacity`: 平均每个生成 token 嵌入 bit 数（`consumed_bits / len(generated_token_ids)`）
 - `metadata`: 算法附加信息（如步骤数、内部状态等）
 
 解码返回 `StegoDecodeResult`：
 - `bits`: 提取出的 bit 串
+- `decode_time_seconds`: 解码耗时（秒）
 - `metadata`: 附加信息（如解码模式、步数等）
 
 ## 自定义算法扩展
@@ -209,7 +217,7 @@ dispatcher = StegoDispatcher(registry=registry)
 
 - 编码与解码必须保持同一组关键条件：
   - 相同模型与 tokenizer
-  - 相同 prompt
+  - 相同 messages（内容与顺序）
   - 相同采样参数（`temperature` / `top_k` / `top_p` / `precision`）
   - 对要求 PRG 的算法，必须使用一致的 PRG 初始化参数
 - `secret_bits` 必须是仅包含 `0/1` 的字符串
@@ -218,7 +226,7 @@ dispatcher = StegoDispatcher(registry=registry)
 
 ## 开发建议
 
-- 若要增加可复现实验，建议固定：随机种子、模型版本、采样参数、prompt 模板
+- 若要增加可复现实验，建议固定：随机种子、模型版本、采样参数、messages 模板
 - 可在 `metadata` 中额外记录实验配置，便于后续分析
 - 如需发布到 PyPI，建议在 `pyproject.toml` 中补充运行时依赖
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+import time
 from typing import Any, Sequence
 
 import numpy as np
@@ -10,6 +11,7 @@ import torch
 from algo.common import _prepare_prefix_ids, _stop_on_eos
 from core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
 from core.stego_context import StegoDecodeContext, StegoEncodeContext
+from utils.entropy import shannon_entropy
 
 
 class AsymmetricStrategy:
@@ -52,6 +54,7 @@ class AsymmetricStrategy:
         return float(probs[start:e].sum().item())
 
     def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
+        encode_started_at = time.perf_counter()
         secure_parameter = int(self._get_extra(context, "secure_parameter", 32))
         func_type = int(self._get_extra(context, "func_type", 0))
         seed = str(self._get_extra(context, "seed", "12345"))
@@ -73,6 +76,8 @@ class AsymmetricStrategy:
         segments: list[str] = []
         step_scores: list[float] = []
         entropy_acc = 0.0
+        entropy_sum = 0.0
+        entropy_steps = 0
 
         secret_len = len(context.secret_bits)
         current_bit = context.secret_bits[0]
@@ -83,6 +88,9 @@ class AsymmetricStrategy:
                 logits = output.logits[0, -1, :]
                 past_key_values = getattr(output, "past_key_values", None)
                 probs = torch.softmax(logits / float(context.temperature), dim=-1)
+                prob_table = probs.tolist()
+                entropy_sum += shannon_entropy(prob_table)
+                entropy_steps += 1
 
                 group_left = 0
                 group_right = 2 ** length
@@ -148,10 +156,17 @@ class AsymmetricStrategy:
 
         text = context.tokenizer.decode(generated_ids)
         consumed = min(bit_cnt, len(context.secret_bits))
+        generated_steps = len(generated_ids)
+        average_entropy = entropy_sum / entropy_steps if entropy_steps > 0 else 0.0
+        encode_time_seconds = time.perf_counter() - encode_started_at
+        embedding_capacity = (consumed / generated_steps) if generated_steps > 0 else 0.0
         return StegoEncodeResult(
             generated_token_ids=generated_ids,
             consumed_bits=consumed,
             text=text,
+            average_entropy=average_entropy,
+            encode_time_seconds=encode_time_seconds,
+            embedding_capacity=embedding_capacity,
             metadata={
                 "algorithm": context.algorithm,
                 "decode_mode_default": "regular",
@@ -163,18 +178,24 @@ class AsymmetricStrategy:
         )
 
     def decode(self, context: StegoDecodeContext) -> StegoDecodeResult:
+        decode_started_at = time.perf_counter()
         mode = str(self._get_extra(context, "decode_mode", "regular")).lower()
         if mode == "robust":
             bits, spans = self._decode_robust(context)
             if context.max_bits is not None:
                 bits = bits[: context.max_bits]
-            return StegoDecodeResult(bits=bits, metadata={"algorithm": context.algorithm, "decode_mode": "robust", "spans": spans})
+            return StegoDecodeResult(
+                bits=bits,
+                decode_time_seconds=time.perf_counter() - decode_started_at,
+                metadata={"algorithm": context.algorithm, "decode_mode": "robust", "spans": spans},
+            )
 
         bits, strings_per_bit = self._decode_regular(context)
         if context.max_bits is not None:
             bits = bits[: context.max_bits]
         return StegoDecodeResult(
             bits=bits,
+            decode_time_seconds=time.perf_counter() - decode_started_at,
             metadata={"algorithm": context.algorithm, "decode_mode": "regular", "strings_per_bit": strings_per_bit},
         )
 

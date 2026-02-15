@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Sequence
 
 import torch
@@ -8,10 +9,12 @@ from algo.common import _filter_distribution, _prepare_prefix_ids, _stop_on_eos
 from .common import ArtifactsCommonMixin
 from core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
 from core.stego_context import StegoDecodeContext, StegoEncodeContext
+from utils.entropy import shannon_entropy
 
 
 class DifferentialBasedStrategy(ArtifactsCommonMixin):
     def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
+        encode_started_at = time.perf_counter()
         prefix_ids = _prepare_prefix_ids(context.messages, context.model, context.tokenizer)
         x = prefix_ids
         past_key_values = None
@@ -20,6 +23,8 @@ class DifferentialBasedStrategy(ArtifactsCommonMixin):
         eos_token_id = getattr(context.tokenizer, "eos_token_id", None)
         stop_on_eos = _stop_on_eos(context, default=True)
         generated_ids: list[int] = []
+        entropy_sum = 0.0
+        entropy_steps = 0
 
         for _ in range(context.max_new_tokens):
             with torch.no_grad():
@@ -27,9 +32,12 @@ class DifferentialBasedStrategy(ArtifactsCommonMixin):
             logits = output.logits[0, -1, :]
             past_key_values = getattr(output, "past_key_values", None)
             probs, token_indices = _filter_distribution(logits, context.temperature, context.top_k, context.top_p)
+            prob_table = probs.tolist()
+            entropy_sum += shannon_entropy(prob_table)
+            entropy_steps += 1
 
             er = self._encode_token_step(
-                prob_table=probs.tolist(),
+                prob_table=prob_table,
                 indices=token_indices.tolist(),
                 bit_stream=context.secret_bits,
                 bit_index=bit_index,
@@ -53,10 +61,17 @@ class DifferentialBasedStrategy(ArtifactsCommonMixin):
 
         text = context.tokenizer.decode(generated_ids)
         effective_consumed_bits = min(bit_index, len(context.secret_bits))
+        generated_steps = len(generated_ids)
+        average_entropy = entropy_sum / entropy_steps if entropy_steps > 0 else 0.0
+        encode_time_seconds = time.perf_counter() - encode_started_at
+        embedding_capacity = (effective_consumed_bits / generated_steps) if generated_steps > 0 else 0.0
         return StegoEncodeResult(
             generated_token_ids=generated_ids,
             consumed_bits=effective_consumed_bits,
             text=text,
+            average_entropy=average_entropy,
+            encode_time_seconds=encode_time_seconds,
+            embedding_capacity=embedding_capacity,
             metadata={
                 "algorithm": context.algorithm,
                 "final_bit_index": bit_index,
@@ -67,8 +82,13 @@ class DifferentialBasedStrategy(ArtifactsCommonMixin):
         )
 
     def decode(self, context: StegoDecodeContext) -> StegoDecodeResult:
+        decode_started_at = time.perf_counter()
         if not context.generated_token_ids:
-            return StegoDecodeResult(bits="", metadata={"decoded_steps": 0})
+            return StegoDecodeResult(
+                bits="",
+                decode_time_seconds=time.perf_counter() - decode_started_at,
+                metadata={"decoded_steps": 0},
+            )
 
         prefix_ids = _prepare_prefix_ids(context.messages, context.model, context.tokenizer)
         x = prefix_ids
@@ -109,6 +129,7 @@ class DifferentialBasedStrategy(ArtifactsCommonMixin):
             bits = bits[: context.max_bits]
         return StegoDecodeResult(
             bits=bits,
+            decode_time_seconds=time.perf_counter() - decode_started_at,
             metadata={"algorithm": context.algorithm, "cur_interval": cur_interval, "decoded_steps": decoded_steps},
         )
     def _encode_token_step(
