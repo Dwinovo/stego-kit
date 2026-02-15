@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from typing import TypeAlias
 
-from algo.ac.ac import ACStrategy
-from algo.asymmetric.asymmetric import AsymmetricStrategy
-from algo.artifacts.binary_based import BinaryBasedStrategy
-from algo.artifacts.differential_based import DifferentialBasedStrategy
-from algo.artifacts.stability_based import StabilityBasedStrategy
-from algo.discop.discop import DiscopStrategy
-from algo.discop.discop_base import DiscopBaseStrategy
-from algo.meteor.meteor import MeteorStrategy
-from core.algorithm_enum import StegoAlgorithm
-from core.stego_algorithm import StegoStrategy
+from stegokit.algo.ac.ac import ACStrategy
+from stegokit.algo.asymmetric.asymmetric import AsymmetricStrategy
+from stegokit.algo.artifacts.binary_based import BinaryBasedStrategy
+from stegokit.algo.artifacts.differential_based import DifferentialBasedStrategy
+from stegokit.algo.artifacts.stability_based import StabilityBasedStrategy
+from stegokit.algo.discop.discop import DiscopStrategy
+from stegokit.algo.discop.discop_base import DiscopBaseStrategy
+from stegokit.algo.meteor.meteor import MeteorStrategy
+from stegokit.core.algorithm_enum import StegoAlgorithm
+from stegokit.core.stego_algorithm import StegoStrategy
 
 AlgorithmRef: TypeAlias = StegoAlgorithm | str
 

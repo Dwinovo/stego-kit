@@ -1,4 +1,4 @@
-from core import (
+from .core import (
     StegoAlgorithmRegistry,
     StegoDecodeContext,
     StegoDecodeResult,
@@ -8,7 +8,7 @@ from core import (
     StegoDispatcher,
     StegoStrategy,
 )
-from utils import PRG
+from .utils import PRG
 
 __all__ = [
     "StegoAlgorithm",

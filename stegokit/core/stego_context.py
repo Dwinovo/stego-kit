@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
-from core.algorithm_enum import StegoAlgorithm
+from stegokit.core.algorithm_enum import StegoAlgorithm
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 

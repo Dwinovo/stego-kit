@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from core.stego_context import StegoDecodeContext, StegoEncodeContext
+from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
 
 
 @dataclass

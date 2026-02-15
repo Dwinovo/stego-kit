@@ -1,65 +1,27 @@
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass
 import time
 from typing import Any, Sequence
 
 import torch
 
-from algo.common import _filter_distribution, _prepare_prefix_ids, _stop_on_eos, bit_slice_with_padding
-from .common import DiscopCommonMixin
-from core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
-from core.stego_context import StegoDecodeContext, StegoEncodeContext
-from utils.entropy import shannon_entropy
+from stegokit.algo.common import (
+    _filter_distribution,
+    _prepare_prefix_ids,
+    _stop_on_eos,
+    bit_slice_with_padding,
+    msb_bits2int,
+    msb_int2bits,
+    num_same_from_beg,
+    to_sorted_tensors,
+)
+from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
+from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
+from stegokit.utils.entropy import shannon_entropy
 
 
-@dataclass
-class _Node:
-    prob: float
-    left: "_Node | None"
-    right: "_Node | None"
-    index: int
-    search_path: int
-
-
-def _is_leaf(node: _Node) -> bool:
-    return node.index != -1
-
-
-def _pop_min(q1: deque[_Node], q2: deque[_Node]) -> _Node:
-    if q1 and q2 and q1[0].prob < q2[0].prob:
-        return q1.popleft()
-    if not q1:
-        return q2.popleft()
-    if not q2:
-        return q1.popleft()
-    return q2.popleft()
-
-
-def _create_huffman_tree(indices: list[int], probs: list[float], search_for: int) -> _Node:
-    q1: deque[_Node] = deque()
-    q2: deque[_Node] = deque()
-
-    for i in range(len(indices) - 1, -1, -1):
-        search_path = 0 if search_for == indices[i] else 9
-        q1.append(_Node(probs[i], None, None, indices[i], search_path))
-
-    while len(q1) + len(q2) > 1:
-        first = _pop_min(q1, q2)
-        second = _pop_min(q1, q2)
-        search_path = 9
-        if first.search_path != 9:
-            search_path = -1
-        elif second.search_path != 9:
-            search_path = 1
-        q2.append(_Node(first.prob + second.prob, first, second, -1, search_path))
-
-    return q2[0] if q2 else q1[0]
-
-
-class DiscopStrategy(DiscopCommonMixin):
-    """Discop strategy."""
+class ACStrategy:
+    """Arithmetic-coding-based steganography strategy."""
 
     def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
         encode_started_at = time.perf_counter()
@@ -96,7 +58,7 @@ class DiscopStrategy(DiscopCommonMixin):
             )
             sampled_token_id = er.get("sampled_token_id")
             if sampled_token_id is None:
-                raise RuntimeError("DiscopStrategy._encode_token_step returned sampled_token_id=None")
+                raise RuntimeError("ACStrategy._encode_token_step returned sampled_token_id=None")
             token_id = int(sampled_token_id)
             generated_ids.append(token_id)
             bits_consumed = int(er.get("bits_consumed", 0))
@@ -181,65 +143,6 @@ class DiscopStrategy(DiscopCommonMixin):
             metadata={"algorithm": context.algorithm, "cur_interval": cur_interval, "decoded_steps": decoded_steps},
         )
 
-    @staticmethod
-    def _encode_step(indices: list[int], probs: list[float], message_bits: str, bit_index: int, prg, precision: int):
-        node = _create_huffman_tree(indices, probs, -1)
-        n_bits = 0
-
-        while not _is_leaf(node):
-            prob_sum = node.prob
-            ptr = prg.generate_random(n=precision)
-            ptr_0 = ptr * prob_sum
-            ptr_1 = (ptr + 0.5) * prob_sum
-            if ptr_1 > prob_sum:
-                ptr_1 -= prob_sum
-
-            partition = node.left.prob
-            path_0 = -1 if ptr_0 < partition else 1
-            path_1 = -1 if ptr_1 < partition else 1
-
-            bit = int(message_bits[n_bits + bit_index])
-            path = path_0 if bit == 0 else path_1
-            node = node.right if path == 1 else node.left
-
-            if path_0 != path_1:
-                n_bits += 1
-
-        return node.index, n_bits
-
-    @staticmethod
-    def _decode_step(indices: list[int], probs: list[float], stego_t: int, prg, precision: int) -> str:
-        node = _create_huffman_tree(indices, probs, stego_t)
-        message_decoded_t = ""
-
-        while not _is_leaf(node):
-            prob_sum = node.prob
-            ptr = prg.generate_random(n=precision)
-            ptr_0 = ptr * prob_sum
-            ptr_1 = (ptr + 0.5) * prob_sum
-            if ptr_1 > prob_sum:
-                ptr_1 -= prob_sum
-
-            partition = node.left.prob
-            path_0 = -1 if ptr_0 < partition else 1
-            path_1 = -1 if ptr_1 < partition else 1
-
-            if path_0 != path_1:
-                if node.search_path == 9:
-                    return ""
-                if path_0 == -1:
-                    path_table_swap = {-1: "0", 1: "1"}
-                else:
-                    path_table_swap = {-1: "1", 1: "0"}
-                message_decoded_t += path_table_swap[node.search_path]
-                node = node.left if node.search_path == -1 else node.right
-            else:
-                node = node.left if path_0 == -1 else node.right
-
-        if node.search_path != 0:
-            return ""
-        return message_decoded_t
-
     def _encode_token_step(
         self,
         *,
@@ -252,20 +155,49 @@ class DiscopStrategy(DiscopCommonMixin):
         cur_interval: list[int] | None,
         extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        del cur_interval, extra
-        prg = self._require_prg(prg)
-        probs_list, indices_list = self._prepare_inputs(prob_table, indices)
+        del prg, extra
+        prob, indices = to_sorted_tensors(prob_table, indices)
+        cur_interval = list(cur_interval or [0, 2 ** precision])
+
+        cur_int_range = cur_interval[1] - cur_interval[0]
+        cur_threshold = 1 / cur_int_range
+        if prob[-1] < cur_threshold:
+            k = max(2, (prob < cur_threshold).nonzero()[0].item())
+            prob = prob[:k]
+            indices = indices[:k]
+
+        prob = prob / prob.sum()
+        prob = (prob * cur_int_range).round().long()
+
+        cum_probs = prob.cumsum(0)
+        overfill_index = (cum_probs > cur_int_range).nonzero()
+        if len(overfill_index) > 0:
+            cum_probs = cum_probs[:overfill_index[0]]
+        cum_probs += cur_int_range - cum_probs[-1]
+        cum_probs += cur_interval[0]
 
         bits_slice = bit_slice_with_padding(bit_stream, bit_index, precision)
+        message_idx = msb_bits2int([int(ch) for ch in bits_slice])
+        selection = (cum_probs > message_idx).nonzero()[0].item()
 
-        sampled_index, n_bits = self._encode_step(
-            indices_list, probs_list, bits_slice, 0, prg, precision
-        )
+        new_int_bottom = cum_probs[selection - 1] if selection > 0 else cur_interval[0]
+        new_int_top = cum_probs[selection]
+
+        new_int_bottom_bits_inc = msb_int2bits(int(new_int_bottom), precision)
+        new_int_top_bits_inc = msb_int2bits(int(new_int_top - 1), precision)
+        num_bits_encoded = num_same_from_beg(new_int_bottom_bits_inc, new_int_top_bits_inc)
+
+        new_int_bottom_bits = new_int_bottom_bits_inc[num_bits_encoded:] + [0] * num_bits_encoded
+        new_int_top_bits = new_int_top_bits_inc[num_bits_encoded:] + [1] * num_bits_encoded
+
+        next_interval = [msb_bits2int(new_int_bottom_bits), msb_bits2int(new_int_top_bits) + 1]
+        sampled_token_id = int(indices[selection].item())
 
         return {
-            "sampled_token_id": int(sampled_index),
-            "bits_consumed": int(n_bits),
-            "next_bit_index": bit_index + int(n_bits),
+            "sampled_token_id": sampled_token_id,
+            "bits_consumed": num_bits_encoded,
+            "cur_interval": next_interval,
+            "next_bit_index": bit_index + num_bits_encoded,
         }
 
     def _decode_token_step(
@@ -279,9 +211,45 @@ class DiscopStrategy(DiscopCommonMixin):
         cur_interval: list[int] | None,
         extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        del cur_interval, extra
-        prg = self._require_prg(prg)
-        probs_list, indices_list = self._prepare_inputs(prob_table, indices)
-        stego_t = int(prev_token_id)
-        bits = self._decode_step(indices_list, probs_list, stego_t, prg, precision)
-        return {"bits": bits, "bits_len": len(bits)}
+        del prg, extra
+        prob, indices = to_sorted_tensors(prob_table, indices)
+        cur_interval = list(cur_interval or [0, 2 ** precision])
+
+        cur_int_range = cur_interval[1] - cur_interval[0]
+        cur_threshold = 1 / cur_int_range
+        if prob[-1] < cur_threshold:
+            k = max(2, (prob < cur_threshold).nonzero()[0].item())
+            prob = prob[:k]
+            indices = indices[:k]
+
+        prob = prob / prob.sum()
+        prob = (prob * cur_int_range).round().long()
+
+        cum_probs = prob.cumsum(0)
+        overfill_index = (cum_probs > cur_int_range).nonzero()
+        if len(overfill_index) > 0:
+            cum_probs = cum_probs[:overfill_index[0]]
+
+        prev = int(prev_token_id)
+        if prev not in indices:
+            return {"bits": "", "bits_len": 0, "cur_interval": cur_interval}
+        if len(overfill_index) > 0 and prev in indices[overfill_index]:
+            return {"bits": "", "bits_len": 0, "cur_interval": cur_interval}
+
+        cum_probs += cur_int_range - cum_probs[-1]
+        cum_probs += cur_interval[0]
+        selection = (indices == prev).nonzero()[0].item()
+
+        new_int_bottom = cum_probs[selection - 1] if selection > 0 else cur_interval[0]
+        new_int_top = cum_probs[selection]
+
+        new_int_bottom_bits_inc = msb_int2bits(int(new_int_bottom), precision)
+        new_int_top_bits_inc = msb_int2bits(int(new_int_top - 1), precision)
+        num_bits_decoded = num_same_from_beg(new_int_bottom_bits_inc, new_int_top_bits_inc)
+        bits = "".join(str(b) for b in new_int_bottom_bits_inc[:num_bits_decoded])
+
+        new_int_bottom_bits = new_int_bottom_bits_inc[num_bits_decoded:] + [0] * num_bits_decoded
+        new_int_top_bits = new_int_top_bits_inc[num_bits_decoded:] + [1] * num_bits_decoded
+        next_interval = [msb_bits2int(new_int_bottom_bits), msb_bits2int(new_int_top_bits) + 1]
+
+        return {"bits": bits, "bits_len": len(bits), "cur_interval": next_interval}

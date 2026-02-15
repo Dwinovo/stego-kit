@@ -5,23 +5,22 @@ from typing import Any, Sequence
 
 import torch
 
-from algo.common import _filter_distribution, _prepare_prefix_ids, _stop_on_eos
-from .common import ArtifactsCommonMixin
-from core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
-from core.stego_context import StegoDecodeContext, StegoEncodeContext
-from utils.entropy import shannon_entropy
+from stegokit.algo.common import (
+    _filter_distribution,
+    _prepare_prefix_ids,
+    _stop_on_eos,
+    bit_slice_with_padding,
+    bits2int,
+    int2bits,
+    num_same_from_beg,
+    require_prg_method,
+    to_sorted_tensors,
+)
+from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
+from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
+from stegokit.utils.entropy import shannon_entropy
 
-
-class StabilityBasedStrategy(ArtifactsCommonMixin):
-    @staticmethod
-    def _normalize_prob(prob: torch.Tensor) -> torch.Tensor:
-        p = prob.to(dtype=torch.float64)
-        total = p.sum()
-        if total <= 0:
-            raise ValueError("Probability sum must be positive")
-        p = p / total
-        return p
-
+class MeteorStrategy:
     def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
         encode_started_at = time.perf_counter()
         prefix_ids = _prepare_prefix_ids(context.messages, context.model, context.tokenizer)
@@ -57,7 +56,7 @@ class StabilityBasedStrategy(ArtifactsCommonMixin):
             )
             sampled_token_id = er.get("sampled_token_id")
             if sampled_token_id is None:
-                raise RuntimeError("StabilityBasedStrategy._encode_token_step returned sampled_token_id=None")
+                raise RuntimeError("MeteorStrategy._encode_token_step returned sampled_token_id=None")
             token_id = int(sampled_token_id)
             generated_ids.append(token_id)
             bits_consumed = int(er.get("bits_consumed", 0))
@@ -142,50 +141,37 @@ class StabilityBasedStrategy(ArtifactsCommonMixin):
             metadata={"algorithm": context.algorithm, "cur_interval": cur_interval, "decoded_steps": decoded_steps},
         )
     @staticmethod
-    def _sample_bin(p_sum: torch.Tensor, q_sum: torch.Tensor, t, device) -> torch.Tensor:
-        p_sum = p_sum.to(device=device, dtype=torch.float64)
-        q_sum = q_sum.to(device=device, dtype=torch.float64)
-        p_sum[-1] = 1.0
-        q_sum[-1] = 1.0
+    def _require_prg(prg):
+        return require_prg_method(prg, "generate_bits", "Meteor strategy")
 
-        t_scalar = min(max(float(t), 0.0), 1.0 - 1e-12)
-        t_tensor = torch.tensor(t_scalar, device=device, dtype=torch.float64)
+    @staticmethod
+    def _prepare_inputs(prob_table: Sequence[float], indices: Sequence[int], precision: int) -> tuple[torch.Tensor, torch.Tensor]:
+        prob, token_indices = to_sorted_tensors(prob_table, indices)
 
-        q_sum2 = torch.concatenate([torch.tensor([0.0], device=device, dtype=torch.float64), q_sum])
-        i = torch.searchsorted(q_sum, t_tensor, side="right")
-        i = torch.clamp(i, max=q_sum.shape[0] - 1)
-        s = t_tensor - q_sum2[i]
-        l = q_sum2[:-1] + s
-        l = l[l < q_sum]
-        if l.numel() == 0:
-            l = t_tensor.view(1)
-        return torch.searchsorted(p_sum, l, side="right")
+        topk = len(prob)
+        epsilon = 2 ** (-precision)
+        nonzero_indices = (prob < epsilon).nonzero().squeeze()
+        if nonzero_indices.numel() > 0:
+            if nonzero_indices.numel() == 1:
+                first = nonzero_indices.item()
+            else:
+                first = nonzero_indices[0].item()
+            topk = min(max(2, first), topk)
 
-    def _sample_method2_encode(self, p: torch.Tensor, t, device) -> torch.Tensor:
-        p, _ = torch.sort(self._normalize_prob(p), descending=True)
-        p_sum = torch.cumsum(p, dim=0)
-        p_sum[-1] = 1.0
-        q2 = min(p[0], 1.0 - p[0] - 1e-8)
-        q2s = p_sum[0] + q2
-        q_sum = torch.concatenate(
-            (torch.tensor([p_sum[0], q2s], device=device, dtype=torch.float64), p_sum[p_sum > q2s]),
-            axis=0,
-        )
-        q_sum[-1] = 1.0
-        return self._sample_bin(p_sum, q_sum, t, device)
+        prob = prob[:topk]
+        token_indices = token_indices[:topk]
+        return prob, token_indices
 
-    def _sample_method2_decode(self, p: torch.Tensor, t, device) -> torch.Tensor:
-        p, _ = torch.sort(self._normalize_prob(p), descending=True)
-        q2 = min(p[0], 1 - p[0] - 1e-8)
-        p_sum = torch.cumsum(p, dim=0)
-        p_sum[-1] = 1.0
-        q2s = p_sum[0] + q2
-        q_sum = torch.concatenate(
-            (torch.tensor([p_sum[0], q2s], device=device, dtype=torch.float64), p_sum[p_sum > q2s]),
-            axis=0,
-        )
-        q_sum[-1] = 1.0
-        return self._sample_bin(p_sum, q_sum, t, device)
+    @staticmethod
+    def _build_cum_probs(prob: torch.Tensor, precision: int) -> torch.Tensor:
+        cur_int_range = 2 ** precision
+        prob = (prob / torch.sum(prob) * cur_int_range).round().long()
+        cum_probs = prob.cumsum(0)
+        overfill_index = (cum_probs > cur_int_range).nonzero()
+        if len(overfill_index) > 0:
+            cum_probs = cum_probs[:overfill_index[0]]
+        cum_probs += cur_int_range - cum_probs[-1]
+        return cum_probs
 
     def _encode_token_step(
         self,
@@ -201,23 +187,32 @@ class StabilityBasedStrategy(ArtifactsCommonMixin):
     ) -> dict[str, Any]:
         del cur_interval, extra
         prg = self._require_prg(prg)
-        prob, indices = self._to_tensors(prob_table, indices)
-        device = prob.device
-        prob, sorted_indices = torch.sort(prob, descending=True)
-        indices = indices[sorted_indices]
+        prob, indices = self._prepare_inputs(prob_table, indices, precision)
+        cum_probs = self._build_cum_probs(prob, precision)
 
-        random_p = prg.generate_random(n=precision)
-        bin_vals = indices[self._sample_method2_encode(prob, random_p, device)]
+        bits_slice = bit_slice_with_padding(bit_stream, bit_index, precision)
+        message_bits = [int(bit) for bit in bits_slice]
 
-        idx, bits = self._uni_cyclic_shift_enc(
-            bit_stream=bit_stream[bit_index:],
-            n=len(bin_vals),
-            prg=prg,
-            precision=precision,
-        )
-        sampled_token_id = int(bin_vals[idx].item())
-        bits_used = len(bits)
-        return {"sampled_token_id": sampled_token_id, "bits_consumed": bits_used, "next_bit_index": bit_index + bits_used}
+        mask_bits = prg.generate_bits(precision)
+        for i in range(len(message_bits)):
+            message_bits[i] = message_bits[i] ^ int(mask_bits[i])
+
+        message_idx = bits2int(reversed(message_bits))
+        selection = (cum_probs > message_idx).nonzero()[0].item()
+
+        new_int_bottom = cum_probs[selection - 1] if selection > 0 else 0
+        new_int_top = cum_probs[selection]
+
+        new_int_bottom_bits = list(reversed(int2bits(int(new_int_bottom), precision)))
+        new_int_top_bits = list(reversed(int2bits(int(new_int_top - 1), precision)))
+        bits_consumed = num_same_from_beg(new_int_bottom_bits, new_int_top_bits)
+
+        sampled_token_id = int(indices[selection].item())
+        return {
+            "sampled_token_id": sampled_token_id,
+            "bits_consumed": bits_consumed,
+            "next_bit_index": bit_index + bits_consumed,
+        }
 
     def _decode_token_step(
         self,
@@ -232,18 +227,24 @@ class StabilityBasedStrategy(ArtifactsCommonMixin):
     ) -> dict[str, Any]:
         del cur_interval, extra
         prg = self._require_prg(prg)
-        prob, indices = self._to_tensors(prob_table, indices)
-        device = prob.device
-        prob, sorted_indices = torch.sort(prob, descending=True)
-        indices = indices[sorted_indices]
-
-        random_p = prg.generate_random(n=precision)
-        bin_vals = indices[self._sample_method2_decode(prob, random_p, device)]
+        prob, indices = self._prepare_inputs(prob_table, indices, precision)
+        cum_probs = self._build_cum_probs(prob, precision)
 
         prev = int(prev_token_id)
-        pos = (bin_vals == prev).nonzero()
-        if len(pos) == 0:
+        positions = (indices == prev).nonzero()
+        if len(positions) == 0:
             return {"bits": "", "bits_len": 0}
-        idx = int(pos.item())
-        bits = self._uni_cyclic_shift_dec(idx=idx, n=len(bin_vals), prg=prg, precision=precision)
+        selection = positions[0].item()
+
+        new_int_bottom = cum_probs[selection - 1] if selection > 0 else 0
+        new_int_top = cum_probs[selection]
+        new_int_bottom_bits = list(reversed(int2bits(int(new_int_bottom), precision)))
+        new_int_top_bits = list(reversed(int2bits(int(new_int_top - 1), precision)))
+        num = num_same_from_beg(new_int_bottom_bits, new_int_top_bits)
+
+        new_bits = new_int_top_bits[:num]
+        mask_bits = prg.generate_bits(precision)
+        for i in range(len(new_bits)):
+            new_bits[i] = new_bits[i] ^ int(mask_bits[i])
+        bits = "".join(str(b) for b in new_bits)
         return {"bits": bits, "bits_len": len(bits)}

@@ -5,7 +5,7 @@ from typing import Sequence
 
 import torch
 
-from algo.common import lsb_bits2int, lsb_int2bits, require_prg_method, to_tensors
+from stegokit.algo.common import lsb_bits2int, lsb_int2bits, require_prg_method, to_tensors
 
 
 class ArtifactsCommonMixin:

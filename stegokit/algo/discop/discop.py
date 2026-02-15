@@ -1,18 +1,66 @@
 from __future__ import annotations
 
+from collections import deque
+from dataclasses import dataclass
 import time
 from typing import Any, Sequence
 
 import torch
 
-from algo.common import _filter_distribution, _prepare_prefix_ids, _stop_on_eos
-from .common import ArtifactsCommonMixin
-from core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
-from core.stego_context import StegoDecodeContext, StegoEncodeContext
-from utils.entropy import shannon_entropy
+from stegokit.algo.common import _filter_distribution, _prepare_prefix_ids, _stop_on_eos, bit_slice_with_padding
+from .common import DiscopCommonMixin
+from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
+from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
+from stegokit.utils.entropy import shannon_entropy
 
 
-class BinaryBasedStrategy(ArtifactsCommonMixin):
+@dataclass
+class _Node:
+    prob: float
+    left: "_Node | None"
+    right: "_Node | None"
+    index: int
+    search_path: int
+
+
+def _is_leaf(node: _Node) -> bool:
+    return node.index != -1
+
+
+def _pop_min(q1: deque[_Node], q2: deque[_Node]) -> _Node:
+    if q1 and q2 and q1[0].prob < q2[0].prob:
+        return q1.popleft()
+    if not q1:
+        return q2.popleft()
+    if not q2:
+        return q1.popleft()
+    return q2.popleft()
+
+
+def _create_huffman_tree(indices: list[int], probs: list[float], search_for: int) -> _Node:
+    q1: deque[_Node] = deque()
+    q2: deque[_Node] = deque()
+
+    for i in range(len(indices) - 1, -1, -1):
+        search_path = 0 if search_for == indices[i] else 9
+        q1.append(_Node(probs[i], None, None, indices[i], search_path))
+
+    while len(q1) + len(q2) > 1:
+        first = _pop_min(q1, q2)
+        second = _pop_min(q1, q2)
+        search_path = 9
+        if first.search_path != 9:
+            search_path = -1
+        elif second.search_path != 9:
+            search_path = 1
+        q2.append(_Node(first.prob + second.prob, first, second, -1, search_path))
+
+    return q2[0] if q2 else q1[0]
+
+
+class DiscopStrategy(DiscopCommonMixin):
+    """Discop strategy."""
+
     def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
         encode_started_at = time.perf_counter()
         prefix_ids = _prepare_prefix_ids(context.messages, context.model, context.tokenizer)
@@ -48,7 +96,7 @@ class BinaryBasedStrategy(ArtifactsCommonMixin):
             )
             sampled_token_id = er.get("sampled_token_id")
             if sampled_token_id is None:
-                raise RuntimeError("BinaryBasedStrategy._encode_token_step returned sampled_token_id=None")
+                raise RuntimeError("DiscopStrategy._encode_token_step returned sampled_token_id=None")
             token_id = int(sampled_token_id)
             generated_ids.append(token_id)
             bits_consumed = int(er.get("bits_consumed", 0))
@@ -132,6 +180,66 @@ class BinaryBasedStrategy(ArtifactsCommonMixin):
             decode_time_seconds=time.perf_counter() - decode_started_at,
             metadata={"algorithm": context.algorithm, "cur_interval": cur_interval, "decoded_steps": decoded_steps},
         )
+
+    @staticmethod
+    def _encode_step(indices: list[int], probs: list[float], message_bits: str, bit_index: int, prg, precision: int):
+        node = _create_huffman_tree(indices, probs, -1)
+        n_bits = 0
+
+        while not _is_leaf(node):
+            prob_sum = node.prob
+            ptr = prg.generate_random(n=precision)
+            ptr_0 = ptr * prob_sum
+            ptr_1 = (ptr + 0.5) * prob_sum
+            if ptr_1 > prob_sum:
+                ptr_1 -= prob_sum
+
+            partition = node.left.prob
+            path_0 = -1 if ptr_0 < partition else 1
+            path_1 = -1 if ptr_1 < partition else 1
+
+            bit = int(message_bits[n_bits + bit_index])
+            path = path_0 if bit == 0 else path_1
+            node = node.right if path == 1 else node.left
+
+            if path_0 != path_1:
+                n_bits += 1
+
+        return node.index, n_bits
+
+    @staticmethod
+    def _decode_step(indices: list[int], probs: list[float], stego_t: int, prg, precision: int) -> str:
+        node = _create_huffman_tree(indices, probs, stego_t)
+        message_decoded_t = ""
+
+        while not _is_leaf(node):
+            prob_sum = node.prob
+            ptr = prg.generate_random(n=precision)
+            ptr_0 = ptr * prob_sum
+            ptr_1 = (ptr + 0.5) * prob_sum
+            if ptr_1 > prob_sum:
+                ptr_1 -= prob_sum
+
+            partition = node.left.prob
+            path_0 = -1 if ptr_0 < partition else 1
+            path_1 = -1 if ptr_1 < partition else 1
+
+            if path_0 != path_1:
+                if node.search_path == 9:
+                    return ""
+                if path_0 == -1:
+                    path_table_swap = {-1: "0", 1: "1"}
+                else:
+                    path_table_swap = {-1: "1", 1: "0"}
+                message_decoded_t += path_table_swap[node.search_path]
+                node = node.left if node.search_path == -1 else node.right
+            else:
+                node = node.left if path_0 == -1 else node.right
+
+        if node.search_path != 0:
+            return ""
+        return message_decoded_t
+
     def _encode_token_step(
         self,
         *,
@@ -146,27 +254,19 @@ class BinaryBasedStrategy(ArtifactsCommonMixin):
     ) -> dict[str, Any]:
         del cur_interval, extra
         prg = self._require_prg(prg)
-        prob, indices = self._to_tensors(prob_table, indices)
+        probs_list, indices_list = self._prepare_inputs(prob_table, indices)
 
-        if prob[0] == 1:
-            sampled = int(indices[0].item())
-            return {"sampled_token_id": sampled, "bits_consumed": 0, "next_bit_index": bit_index}
+        bits_slice = bit_slice_with_padding(bit_stream, bit_index, precision)
 
-        bins, prob_new = self._binary_based_recombination(prob, indices, precision)
-        random_p = prg.generate_random(n=precision)
-        cdf = torch.cumsum(prob_new, dim=0)
-        bin_idx = torch.searchsorted(cdf, random_p).item()
-        bin_vals = bins[bin_idx]
-
-        idx, bits = self._uni_cyclic_shift_enc(
-            bit_stream=bit_stream[bit_index:],
-            n=len(bin_vals),
-            prg=prg,
-            precision=precision,
+        sampled_index, n_bits = self._encode_step(
+            indices_list, probs_list, bits_slice, 0, prg, precision
         )
-        sampled_token_id = int(bin_vals[idx].item())
-        bits_used = len(bits)
-        return {"sampled_token_id": sampled_token_id, "bits_consumed": bits_used, "next_bit_index": bit_index + bits_used}
+
+        return {
+            "sampled_token_id": int(sampled_index),
+            "bits_consumed": int(n_bits),
+            "next_bit_index": bit_index + int(n_bits),
+        }
 
     def _decode_token_step(
         self,
@@ -181,21 +281,7 @@ class BinaryBasedStrategy(ArtifactsCommonMixin):
     ) -> dict[str, Any]:
         del cur_interval, extra
         prg = self._require_prg(prg)
-        prob, indices = self._to_tensors(prob_table, indices)
-
-        if prob[0] == 1:
-            return {"bits": "", "bits_len": 0}
-
-        bins, prob_new = self._binary_based_recombination(prob, indices, precision)
-        random_p = prg.generate_random(n=precision)
-        cdf = torch.cumsum(prob_new, dim=0)
-        bin_idx = torch.searchsorted(cdf, random_p).item()
-        bin_vals = bins[bin_idx]
-
-        prev = int(prev_token_id)
-        pos = (bin_vals == prev).nonzero()
-        if len(pos) == 0:
-            return {"bits": "", "bits_len": 0}
-        idx = int(pos.item())
-        bits = self._uni_cyclic_shift_dec(idx=idx, n=len(bin_vals), prg=prg, precision=precision)
+        probs_list, indices_list = self._prepare_inputs(prob_table, indices)
+        stego_t = int(prev_token_id)
+        bits = self._decode_step(indices_list, probs_list, stego_t, prg, precision)
         return {"bits": bits, "bits_len": len(bits)}

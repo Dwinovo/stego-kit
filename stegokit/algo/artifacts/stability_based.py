@@ -5,23 +5,22 @@ from typing import Any, Sequence
 
 import torch
 
-from algo.common import (
-    _filter_distribution,
-    _prepare_prefix_ids,
-    _stop_on_eos,
-    bit_slice_with_padding,
-    msb_bits2int,
-    msb_int2bits,
-    num_same_from_beg,
-    to_sorted_tensors,
-)
-from core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
-from core.stego_context import StegoDecodeContext, StegoEncodeContext
-from utils.entropy import shannon_entropy
+from stegokit.algo.common import _filter_distribution, _prepare_prefix_ids, _stop_on_eos
+from .common import ArtifactsCommonMixin
+from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
+from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
+from stegokit.utils.entropy import shannon_entropy
 
 
-class ACStrategy:
-    """Arithmetic-coding-based steganography strategy."""
+class StabilityBasedStrategy(ArtifactsCommonMixin):
+    @staticmethod
+    def _normalize_prob(prob: torch.Tensor) -> torch.Tensor:
+        p = prob.to(dtype=torch.float64)
+        total = p.sum()
+        if total <= 0:
+            raise ValueError("Probability sum must be positive")
+        p = p / total
+        return p
 
     def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
         encode_started_at = time.perf_counter()
@@ -58,7 +57,7 @@ class ACStrategy:
             )
             sampled_token_id = er.get("sampled_token_id")
             if sampled_token_id is None:
-                raise RuntimeError("ACStrategy._encode_token_step returned sampled_token_id=None")
+                raise RuntimeError("StabilityBasedStrategy._encode_token_step returned sampled_token_id=None")
             token_id = int(sampled_token_id)
             generated_ids.append(token_id)
             bits_consumed = int(er.get("bits_consumed", 0))
@@ -142,6 +141,51 @@ class ACStrategy:
             decode_time_seconds=time.perf_counter() - decode_started_at,
             metadata={"algorithm": context.algorithm, "cur_interval": cur_interval, "decoded_steps": decoded_steps},
         )
+    @staticmethod
+    def _sample_bin(p_sum: torch.Tensor, q_sum: torch.Tensor, t, device) -> torch.Tensor:
+        p_sum = p_sum.to(device=device, dtype=torch.float64)
+        q_sum = q_sum.to(device=device, dtype=torch.float64)
+        p_sum[-1] = 1.0
+        q_sum[-1] = 1.0
+
+        t_scalar = min(max(float(t), 0.0), 1.0 - 1e-12)
+        t_tensor = torch.tensor(t_scalar, device=device, dtype=torch.float64)
+
+        q_sum2 = torch.concatenate([torch.tensor([0.0], device=device, dtype=torch.float64), q_sum])
+        i = torch.searchsorted(q_sum, t_tensor, side="right")
+        i = torch.clamp(i, max=q_sum.shape[0] - 1)
+        s = t_tensor - q_sum2[i]
+        l = q_sum2[:-1] + s
+        l = l[l < q_sum]
+        if l.numel() == 0:
+            l = t_tensor.view(1)
+        return torch.searchsorted(p_sum, l, side="right")
+
+    def _sample_method2_encode(self, p: torch.Tensor, t, device) -> torch.Tensor:
+        p, _ = torch.sort(self._normalize_prob(p), descending=True)
+        p_sum = torch.cumsum(p, dim=0)
+        p_sum[-1] = 1.0
+        q2 = min(p[0], 1.0 - p[0] - 1e-8)
+        q2s = p_sum[0] + q2
+        q_sum = torch.concatenate(
+            (torch.tensor([p_sum[0], q2s], device=device, dtype=torch.float64), p_sum[p_sum > q2s]),
+            axis=0,
+        )
+        q_sum[-1] = 1.0
+        return self._sample_bin(p_sum, q_sum, t, device)
+
+    def _sample_method2_decode(self, p: torch.Tensor, t, device) -> torch.Tensor:
+        p, _ = torch.sort(self._normalize_prob(p), descending=True)
+        q2 = min(p[0], 1 - p[0] - 1e-8)
+        p_sum = torch.cumsum(p, dim=0)
+        p_sum[-1] = 1.0
+        q2s = p_sum[0] + q2
+        q_sum = torch.concatenate(
+            (torch.tensor([p_sum[0], q2s], device=device, dtype=torch.float64), p_sum[p_sum > q2s]),
+            axis=0,
+        )
+        q_sum[-1] = 1.0
+        return self._sample_bin(p_sum, q_sum, t, device)
 
     def _encode_token_step(
         self,
@@ -155,50 +199,25 @@ class ACStrategy:
         cur_interval: list[int] | None,
         extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        del prg, extra
-        prob, indices = to_sorted_tensors(prob_table, indices)
-        cur_interval = list(cur_interval or [0, 2 ** precision])
+        del cur_interval, extra
+        prg = self._require_prg(prg)
+        prob, indices = self._to_tensors(prob_table, indices)
+        device = prob.device
+        prob, sorted_indices = torch.sort(prob, descending=True)
+        indices = indices[sorted_indices]
 
-        cur_int_range = cur_interval[1] - cur_interval[0]
-        cur_threshold = 1 / cur_int_range
-        if prob[-1] < cur_threshold:
-            k = max(2, (prob < cur_threshold).nonzero()[0].item())
-            prob = prob[:k]
-            indices = indices[:k]
+        random_p = prg.generate_random(n=precision)
+        bin_vals = indices[self._sample_method2_encode(prob, random_p, device)]
 
-        prob = prob / prob.sum()
-        prob = (prob * cur_int_range).round().long()
-
-        cum_probs = prob.cumsum(0)
-        overfill_index = (cum_probs > cur_int_range).nonzero()
-        if len(overfill_index) > 0:
-            cum_probs = cum_probs[:overfill_index[0]]
-        cum_probs += cur_int_range - cum_probs[-1]
-        cum_probs += cur_interval[0]
-
-        bits_slice = bit_slice_with_padding(bit_stream, bit_index, precision)
-        message_idx = msb_bits2int([int(ch) for ch in bits_slice])
-        selection = (cum_probs > message_idx).nonzero()[0].item()
-
-        new_int_bottom = cum_probs[selection - 1] if selection > 0 else cur_interval[0]
-        new_int_top = cum_probs[selection]
-
-        new_int_bottom_bits_inc = msb_int2bits(int(new_int_bottom), precision)
-        new_int_top_bits_inc = msb_int2bits(int(new_int_top - 1), precision)
-        num_bits_encoded = num_same_from_beg(new_int_bottom_bits_inc, new_int_top_bits_inc)
-
-        new_int_bottom_bits = new_int_bottom_bits_inc[num_bits_encoded:] + [0] * num_bits_encoded
-        new_int_top_bits = new_int_top_bits_inc[num_bits_encoded:] + [1] * num_bits_encoded
-
-        next_interval = [msb_bits2int(new_int_bottom_bits), msb_bits2int(new_int_top_bits) + 1]
-        sampled_token_id = int(indices[selection].item())
-
-        return {
-            "sampled_token_id": sampled_token_id,
-            "bits_consumed": num_bits_encoded,
-            "cur_interval": next_interval,
-            "next_bit_index": bit_index + num_bits_encoded,
-        }
+        idx, bits = self._uni_cyclic_shift_enc(
+            bit_stream=bit_stream[bit_index:],
+            n=len(bin_vals),
+            prg=prg,
+            precision=precision,
+        )
+        sampled_token_id = int(bin_vals[idx].item())
+        bits_used = len(bits)
+        return {"sampled_token_id": sampled_token_id, "bits_consumed": bits_used, "next_bit_index": bit_index + bits_used}
 
     def _decode_token_step(
         self,
@@ -211,45 +230,20 @@ class ACStrategy:
         cur_interval: list[int] | None,
         extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        del prg, extra
-        prob, indices = to_sorted_tensors(prob_table, indices)
-        cur_interval = list(cur_interval or [0, 2 ** precision])
+        del cur_interval, extra
+        prg = self._require_prg(prg)
+        prob, indices = self._to_tensors(prob_table, indices)
+        device = prob.device
+        prob, sorted_indices = torch.sort(prob, descending=True)
+        indices = indices[sorted_indices]
 
-        cur_int_range = cur_interval[1] - cur_interval[0]
-        cur_threshold = 1 / cur_int_range
-        if prob[-1] < cur_threshold:
-            k = max(2, (prob < cur_threshold).nonzero()[0].item())
-            prob = prob[:k]
-            indices = indices[:k]
-
-        prob = prob / prob.sum()
-        prob = (prob * cur_int_range).round().long()
-
-        cum_probs = prob.cumsum(0)
-        overfill_index = (cum_probs > cur_int_range).nonzero()
-        if len(overfill_index) > 0:
-            cum_probs = cum_probs[:overfill_index[0]]
+        random_p = prg.generate_random(n=precision)
+        bin_vals = indices[self._sample_method2_decode(prob, random_p, device)]
 
         prev = int(prev_token_id)
-        if prev not in indices:
-            return {"bits": "", "bits_len": 0, "cur_interval": cur_interval}
-        if len(overfill_index) > 0 and prev in indices[overfill_index]:
-            return {"bits": "", "bits_len": 0, "cur_interval": cur_interval}
-
-        cum_probs += cur_int_range - cum_probs[-1]
-        cum_probs += cur_interval[0]
-        selection = (indices == prev).nonzero()[0].item()
-
-        new_int_bottom = cum_probs[selection - 1] if selection > 0 else cur_interval[0]
-        new_int_top = cum_probs[selection]
-
-        new_int_bottom_bits_inc = msb_int2bits(int(new_int_bottom), precision)
-        new_int_top_bits_inc = msb_int2bits(int(new_int_top - 1), precision)
-        num_bits_decoded = num_same_from_beg(new_int_bottom_bits_inc, new_int_top_bits_inc)
-        bits = "".join(str(b) for b in new_int_bottom_bits_inc[:num_bits_decoded])
-
-        new_int_bottom_bits = new_int_bottom_bits_inc[num_bits_decoded:] + [0] * num_bits_decoded
-        new_int_top_bits = new_int_top_bits_inc[num_bits_decoded:] + [1] * num_bits_decoded
-        next_interval = [msb_bits2int(new_int_bottom_bits), msb_bits2int(new_int_top_bits) + 1]
-
-        return {"bits": bits, "bits_len": len(bits), "cur_interval": next_interval}
+        pos = (bin_vals == prev).nonzero()
+        if len(pos) == 0:
+            return {"bits": "", "bits_len": 0}
+        idx = int(pos.item())
+        bits = self._uni_cyclic_shift_dec(idx=idx, n=len(bin_vals), prg=prg, precision=precision)
+        return {"bits": bits, "bits_len": len(bits)}

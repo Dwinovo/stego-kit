@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from algo.common import require_prg_method, to_sorted_tensors
+from stegokit.algo.common import require_prg_method, to_sorted_tensors
 
 
 class DiscopCommonMixin:

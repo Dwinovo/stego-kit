@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Sequence
 
 import torch
 
-from algo.common import _filter_distribution, _prepare_prefix_ids, _stop_on_eos
-from .common import ArtifactsCommonMixin
-from core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
-from core.stego_context import StegoDecodeContext, StegoEncodeContext
-from utils.entropy import shannon_entropy
+from stegokit.algo.common import _filter_distribution, _prepare_prefix_ids, _stop_on_eos, bit_slice_with_padding
+from .common import DiscopCommonMixin
+from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
+from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
+from stegokit.utils.entropy import shannon_entropy
 
 
-class DifferentialBasedStrategy(ArtifactsCommonMixin):
+class DiscopBaseStrategy(DiscopCommonMixin):
+    """Discop-base strategy."""
+
     def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
         encode_started_at = time.perf_counter()
         prefix_ids = _prepare_prefix_ids(context.messages, context.model, context.tokenizer)
@@ -48,7 +51,7 @@ class DifferentialBasedStrategy(ArtifactsCommonMixin):
             )
             sampled_token_id = er.get("sampled_token_id")
             if sampled_token_id is None:
-                raise RuntimeError("DifferentialBasedStrategy._encode_token_step returned sampled_token_id=None")
+                raise RuntimeError("DiscopBaseStrategy._encode_token_step returned sampled_token_id=None")
             token_id = int(sampled_token_id)
             generated_ids.append(token_id)
             bits_consumed = int(er.get("bits_consumed", 0))
@@ -132,6 +135,97 @@ class DifferentialBasedStrategy(ArtifactsCommonMixin):
             decode_time_seconds=time.perf_counter() - decode_started_at,
             metadata={"algorithm": context.algorithm, "cur_interval": cur_interval, "decoded_steps": decoded_steps},
         )
+
+    @staticmethod
+    def _baseline_encode_step(indices: list[int], probs: list[float], message_bits: str, bit_index: int, prg, precision: int):
+        probs_cumsum = torch.tensor(probs).cumsum(dim=0)
+        interval_begin = torch.cat((torch.tensor([0], device=probs_cumsum.device), probs_cumsum[:-1]), dim=0)
+
+        capacity = int(math.log2(1 / probs[0]))
+        capacity_upper_bound = capacity + 1
+        tbl = {}
+        ptr = prg.generate_random(n=precision)
+        n_bits = 0
+
+        while capacity <= capacity_upper_bound:
+            if capacity == 0:
+                capacity += 1
+                continue
+
+            rotate_step_size = 2.0 ** (-capacity)
+            is_available = True
+            tbl_new = {}
+            for i in range(int(2 ** capacity)):
+                ptr_i = ptr + i * rotate_step_size
+                if ptr_i >= 1.0:
+                    ptr_i -= 1
+                index_idx = (ptr_i >= interval_begin).nonzero()[-1].item()
+                index = indices[index_idx]
+                if index in tbl_new.values():
+                    is_available = False
+                    break
+                tbl_new[i] = index
+            if not is_available:
+                break
+            tbl = tbl_new
+            n_bits = capacity
+            capacity += 1
+
+        if n_bits < 1:
+            sampled_index = indices[(ptr >= interval_begin).nonzero()[-1].item()]
+        else:
+            cur_message_bits_decimal = 0
+            base = 1
+            for d in range(n_bits - 1, -1, -1):
+                if message_bits[bit_index + d] == "1":
+                    cur_message_bits_decimal += base
+                base *= 2
+            sampled_index = tbl[cur_message_bits_decimal]
+
+        return sampled_index, n_bits
+
+    @staticmethod
+    def _baseline_decode_step(indices: list[int], probs: list[float], stego_t: int, prg, precision: int) -> str:
+        probs_cumsum = torch.tensor(probs).cumsum(dim=0)
+        interval_begin = torch.cat((torch.tensor([0], device=probs_cumsum.device), probs_cumsum[:-1]), dim=0)
+
+        capacity = int(math.log2(1 / probs[0]))
+        capacity_upper_bound = capacity + 1
+        tbl = {}
+        ptr = prg.generate_random(n=precision)
+        n_bits = 0
+
+        while capacity <= capacity_upper_bound:
+            if capacity == 0:
+                capacity += 1
+                continue
+
+            rotate_step_size = 2.0 ** (-capacity)
+            is_available = True
+            tbl_new = {}
+            for i in range(int(2 ** capacity)):
+                ptr_i = ptr + i * rotate_step_size
+                if ptr_i >= 1.0:
+                    ptr_i -= 1
+                index_idx = (ptr_i >= interval_begin).nonzero()[-1].item()
+                index = indices[index_idx]
+                if index in tbl_new.values():
+                    is_available = False
+                    break
+                tbl_new[i] = index
+            if not is_available:
+                break
+            tbl = tbl_new
+            n_bits = capacity
+            capacity += 1
+
+        if n_bits < 1:
+            return ""
+        if stego_t not in tbl.values():
+            return ""
+        tbl_swapped = dict(zip(tbl.values(), tbl.keys()))
+        return bin(tbl_swapped[stego_t])[2:].zfill(n_bits)
+
     def _encode_token_step(
         self,
         *,
@@ -146,25 +240,19 @@ class DifferentialBasedStrategy(ArtifactsCommonMixin):
     ) -> dict[str, Any]:
         del cur_interval, extra
         prg = self._require_prg(prg)
-        prob, indices = self._to_tensors(prob_table, indices)
+        probs_list, indices_list = self._prepare_inputs(prob_table, indices)
 
-        indices_nonzero, bins, prob_new = self._differential_based_recombination(prob, indices)
-        prob_new = prob_new / prob_new.sum()
+        bits_slice = bit_slice_with_padding(bit_stream, bit_index, precision)
 
-        random_p = prg.generate_random(n=precision)
-        cdf = torch.cumsum(prob_new, dim=0)
-        bin_idx = torch.searchsorted(cdf, random_p).item()
-        bin_vals = indices_nonzero[bins[bin_idx]:]
-
-        idx, bits = self._uni_cyclic_shift_enc(
-            bit_stream=bit_stream[bit_index:],
-            n=len(bin_vals),
-            prg=prg,
-            precision=precision,
+        sampled_index, n_bits = self._baseline_encode_step(
+            indices_list, probs_list, bits_slice, 0, prg, precision
         )
-        sampled_token_id = int(bin_vals[idx].item())
-        bits_used = len(bits)
-        return {"sampled_token_id": sampled_token_id, "bits_consumed": bits_used, "next_bit_index": bit_index + bits_used}
+
+        return {
+            "sampled_token_id": int(sampled_index),
+            "bits_consumed": int(n_bits),
+            "next_bit_index": bit_index + int(n_bits),
+        }
 
     def _decode_token_step(
         self,
@@ -179,20 +267,7 @@ class DifferentialBasedStrategy(ArtifactsCommonMixin):
     ) -> dict[str, Any]:
         del cur_interval, extra
         prg = self._require_prg(prg)
-        prob, indices = self._to_tensors(prob_table, indices)
-
-        indices_nonzero, bins, prob_new = self._differential_based_recombination(prob, indices)
-        prob_new = prob_new / prob_new.sum()
-
-        random_p = prg.generate_random(n=precision)
-        cdf = torch.cumsum(prob_new, dim=0)
-        bin_idx = torch.searchsorted(cdf, random_p).item()
-        bin_vals = indices_nonzero[bins[bin_idx]:]
-
-        prev = int(prev_token_id)
-        pos = (bin_vals == prev).nonzero()
-        if len(pos) == 0:
-            return {"bits": "", "bits_len": 0}
-        idx = int(pos.item())
-        bits = self._uni_cyclic_shift_dec(idx=idx, n=len(bin_vals), prg=prg, precision=precision)
+        probs_list, indices_list = self._prepare_inputs(prob_table, indices)
+        stego_t = int(prev_token_id)
+        bits = self._baseline_decode_step(indices_list, probs_list, stego_t, prg, precision)
         return {"bits": bits, "bits_len": len(bits)}

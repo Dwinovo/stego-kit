@@ -8,10 +8,10 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 
-from algo.common import _prepare_prefix_ids, _stop_on_eos
-from core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
-from core.stego_context import StegoDecodeContext, StegoEncodeContext
-from utils.entropy import shannon_entropy
+from stegokit.algo.common import _prepare_prefix_ids, _stop_on_eos
+from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
+from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
+from stegokit.utils.entropy import shannon_entropy
 
 
 class AsymmetricStrategy:

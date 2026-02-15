@@ -4,13 +4,13 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
-from core.algorithm_enum import StegoAlgorithm
-from core.stego_algorithm import (
+from stegokit.core.algorithm_enum import StegoAlgorithm
+from stegokit.core.stego_algorithm import (
     StegoDecodeResult,
     StegoEncodeResult,
 )
-from core.stego_context import StegoDecodeContext, StegoEncodeContext
-from core.stego_registry import StegoAlgorithmRegistry
+from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
+from stegokit.core.stego_registry import StegoAlgorithmRegistry
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 logger = logging.getLogger(__name__)
