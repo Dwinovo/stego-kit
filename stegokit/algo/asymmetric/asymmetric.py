@@ -11,7 +11,6 @@ import torch
 from stegokit.algo.common import _prepare_prefix_ids, _stop_on_eos
 from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
 from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
-from stegokit.utils.entropy import shannon_entropy
 
 
 class AsymmetricStrategy:
@@ -76,8 +75,6 @@ class AsymmetricStrategy:
         segments: list[str] = []
         step_scores: list[float] = []
         entropy_acc = 0.0
-        entropy_sum = 0.0
-        entropy_steps = 0
 
         secret_len = len(context.secret_bits)
         current_bit = context.secret_bits[0]
@@ -88,9 +85,6 @@ class AsymmetricStrategy:
                 logits = output.logits[0, -1, :]
                 past_key_values = getattr(output, "past_key_values", None)
                 probs = torch.softmax(logits / float(context.temperature), dim=-1)
-                prob_table = probs.tolist()
-                entropy_sum += shannon_entropy(prob_table)
-                entropy_steps += 1
 
                 group_left = 0
                 group_right = 2 ** length
@@ -157,14 +151,12 @@ class AsymmetricStrategy:
         text = context.tokenizer.decode(generated_ids)
         consumed = min(bit_cnt, len(context.secret_bits))
         generated_steps = len(generated_ids)
-        average_entropy = entropy_sum / entropy_steps if entropy_steps > 0 else 0.0
         encode_time_seconds = time.perf_counter() - encode_started_at
         embedding_capacity = (consumed / generated_steps) if generated_steps > 0 else 0.0
         return StegoEncodeResult(
             generated_token_ids=generated_ids,
             consumed_bits=consumed,
             text=text,
-            average_entropy=average_entropy,
             encode_time_seconds=encode_time_seconds,
             embedding_capacity=embedding_capacity,
             metadata={
