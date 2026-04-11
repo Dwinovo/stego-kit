@@ -334,3 +334,17 @@ dispatcher = StegoDispatcher(registry=registry)
 
 - **开源协议**: StegoKit 基于 [MIT License](./LICENSE) 对外开放并限制使用。  
 - **特别致谢**: 本仓库在整合梳理各家模型论文协议时，广泛参考了公开的学术归档库 [Provably Secure Steganography](https://github.com/comydream/provably-secure-steganography) 列表；特别感谢社区贡献者对学术开放生态给予的持续知识支持。
+
+## 引用 (Citation)
+
+如果您在研究或工程项目中使用了 StegoKit，请通过以下 BibTeX 格式引用本项目：
+
+```bibtex
+@software{stegokit2026,
+  author = {Wansheng Wu and Kaibo Huang and Yukun Wei and Zhongliang Yang and Linna Zhou},
+  title = {StegoKit: A Unified \& Modular Generative Steganography Toolkit for LLMs},
+  year = {2026},
+  url = {https://github.com/your-repo-url/stego-kit}
+}
+```
+
