@@ -46,9 +46,7 @@ class StabilityBasedStrategy(FDPSSCommonMixin):
                 bit_stream=context.secret_bits,
                 bit_index=bit_index,
                 precision=context.precision,
-                prg=context.prg,
-                cur_interval=cur_interval,
-                extra=context.extra,
+                material=context.material,
             )
             sampled_token_id = er.get("sampled_token_id")
             if sampled_token_id is None:
@@ -112,9 +110,7 @@ class StabilityBasedStrategy(FDPSSCommonMixin):
                 indices=token_indices.tolist(),
                 prev_token_id=int(token_id),
                 precision=context.precision,
-                prg=context.prg,
-                cur_interval=cur_interval,
-                extra=context.extra,
+                material=context.material,
             )
             bits = str(dr.get("bits", ""))
             recovered_parts.append(bits)
@@ -188,12 +184,9 @@ class StabilityBasedStrategy(FDPSSCommonMixin):
         bit_stream: str,
         bit_index: int,
         precision: int,
-        prg: Any | None,
-        cur_interval: list[int] | None,
-        extra: dict[str, Any] | None,
+        material: Any,
     ) -> dict[str, Any]:
-        del cur_interval, extra
-        prg = self._require_prg(prg)
+        prg = self._require_prg(material)
         prob, indices = self._to_tensors(prob_table, indices)
         device = prob.device
         prob, sorted_indices = torch.sort(prob, descending=True)
@@ -219,12 +212,9 @@ class StabilityBasedStrategy(FDPSSCommonMixin):
         indices: Sequence[int],
         prev_token_id: int,
         precision: int,
-        prg: Any | None,
-        cur_interval: list[int] | None,
-        extra: dict[str, Any] | None,
+        material: Any,
     ) -> dict[str, Any]:
-        del cur_interval, extra
-        prg = self._require_prg(prg)
+        prg = self._require_prg(material)
         prob, indices = self._to_tensors(prob_table, indices)
         device = prob.device
         prob, sorted_indices = torch.sort(prob, descending=True)

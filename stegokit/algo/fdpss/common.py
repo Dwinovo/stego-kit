@@ -5,13 +5,14 @@ from typing import Sequence
 
 import torch
 
-from stegokit.algo.common import lsb_bits2int, lsb_int2bits, require_prg_method, to_tensors
+from stegokit.algo.common import lsb_bits2int, lsb_int2bits, to_tensors
+from stegokit.core.security_material import require_randomness_material
 
 
 class FDPSSCommonMixin:
     @staticmethod
-    def _require_prg(prg):
-        return require_prg_method(prg, "generate_random", "FDPSS strategies")
+    def _require_prg(material):
+        return require_randomness_material(material, "FDPSS strategies")
 
     @staticmethod
     def _to_tensors(prob_table: Sequence[float], indices: Sequence[int]) -> tuple[torch.Tensor, torch.Tensor]:

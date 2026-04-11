@@ -47,9 +47,7 @@ class ACStrategy:
                 bit_stream=context.secret_bits,
                 bit_index=bit_index,
                 precision=context.precision,
-                prg=context.prg,
                 cur_interval=cur_interval,
-                extra=context.extra,
             )
             sampled_token_id = er.get("sampled_token_id")
             if sampled_token_id is None:
@@ -113,9 +111,7 @@ class ACStrategy:
                 indices=token_indices.tolist(),
                 prev_token_id=int(token_id),
                 precision=context.precision,
-                prg=context.prg,
                 cur_interval=cur_interval,
-                extra=context.extra,
             )
             bits = str(dr.get("bits", ""))
             recovered_parts.append(bits)
@@ -144,11 +140,8 @@ class ACStrategy:
         bit_stream: str,
         bit_index: int,
         precision: int,
-        prg: Any | None,
         cur_interval: list[int] | None,
-        extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        del prg, extra
         prob, indices = to_sorted_tensors(prob_table, indices)
         cur_interval = list(cur_interval or [0, 2 ** precision])
 
@@ -200,11 +193,8 @@ class ACStrategy:
         indices: Sequence[int],
         prev_token_id: int,
         precision: int,
-        prg: Any | None,
         cur_interval: list[int] | None,
-        extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        del prg, extra
         prob, indices = to_sorted_tensors(prob_table, indices)
         cur_interval = list(cur_interval or [0, 2 ** precision])
 

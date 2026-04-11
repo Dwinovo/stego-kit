@@ -4,12 +4,6 @@ from typing import Any, Sequence
 
 import torch
 
-def require_prg_method(prg, method: str, strategy_name: str):
-    if prg is None or not hasattr(prg, method):
-        raise ValueError(f"{strategy_name} requires context.prg with method {method}(n)")
-    return prg
-
-
 def to_tensors(prob_table: Sequence[float], indices: Sequence[int]) -> tuple[torch.Tensor, torch.Tensor]:
     prob = torch.tensor(prob_table, dtype=torch.float64)
     token_indices = torch.tensor(indices, dtype=torch.long)

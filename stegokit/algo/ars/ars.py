@@ -9,12 +9,13 @@ import numpy as np
 import torch
 
 from stegokit.algo.common import _prepare_prefix_ids, _stop_on_eos
+from stegokit.core.algorithm_config import ARSDecodeConfig, ARSEncodeConfig
 from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
 from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
 
 
 class ARSStrategy:
-    """Asymmetric-resource steganography strategy adapted from demo.ipynb/fast_decode.py."""
+    """ARS steganography strategy adapted from demo.ipynb/fast_decode.py."""
 
     @staticmethod
     def _sampling_function(x, func_type: int):
@@ -27,8 +28,16 @@ class ARSStrategy:
         raise ValueError(f"Unsupported func_type: {func_type}")
 
     @staticmethod
-    def _get_extra(context, key: str, default):
-        return context.extra.get(key, default) if context.extra else default
+    def _require_encode_config(config: Any) -> ARSEncodeConfig:
+        if not isinstance(config, ARSEncodeConfig):
+            raise TypeError("ARS strategy requires context.config to be an ARSEncodeConfig for encoding")
+        return config
+
+    @staticmethod
+    def _require_decode_config(config: Any) -> ARSDecodeConfig:
+        if not isinstance(config, ARSDecodeConfig):
+            raise TypeError("ARS strategy requires context.config to be an ARSDecodeConfig for decoding")
+        return config
 
     @staticmethod
     def _bit_length(tokenizer) -> int:
@@ -54,9 +63,10 @@ class ARSStrategy:
 
     def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
         encode_started_at = time.perf_counter()
-        secure_parameter = int(self._get_extra(context, "secure_parameter", 32))
-        func_type = int(self._get_extra(context, "func_type", 0))
-        seed = str(self._get_extra(context, "seed", "12345"))
+        config = self._require_encode_config(context.config)
+        secure_parameter = int(config.secure_parameter)
+        func_type = int(config.func_type)
+        seed = str(config.seed)
 
         threshold = 2 ** (-secure_parameter)
         length = self._bit_length(context.tokenizer)
@@ -77,7 +87,24 @@ class ARSStrategy:
         entropy_acc = 0.0
 
         secret_len = len(context.secret_bits)
+        if secret_len == 0:
+            return StegoEncodeResult(
+                generated_token_ids=[],
+                consumed_bits=0,
+                text="",
+                encode_time_seconds=time.perf_counter() - encode_started_at,
+                embedding_capacity=0.0,
+                metadata={
+                    "algorithm": context.algorithm,
+                    "decode_mode_default": "regular",
+                    "secure_parameter": secure_parameter,
+                    "func_type": func_type,
+                    "segments": [],
+                    "step_scores": [],
+                },
+            )
         current_bit = context.secret_bits[0]
+        secret_exhausted = False
 
         with torch.no_grad():
             for _ in range(context.max_new_tokens):
@@ -137,13 +164,18 @@ class ARSStrategy:
                         sum_v = 0.0
                         cnt_v = 0
                         bit_cnt += 1
-                        current_bit = context.secret_bits[bit_cnt]
                         segments.append(segment)
                         segment = ""
+                        if bit_cnt >= secret_len:
+                            secret_exhausted = True
+                            break
+                        current_bit = context.secret_bits[bit_cnt]
 
                 token_id = int(group_left)
                 generated_ids.append(token_id)
                 x = torch.tensor([[token_id]], device=prompt_ids.device, dtype=torch.long)
+                if secret_exhausted:
+                    break
                 if stop_on_eos and eos_token_id is not None and token_id == int(eos_token_id):
                     break
 
@@ -171,9 +203,10 @@ class ARSStrategy:
 
     def decode(self, context: StegoDecodeContext) -> StegoDecodeResult:
         decode_started_at = time.perf_counter()
-        mode = str(self._get_extra(context, "decode_mode", "regular")).lower()
+        config = self._require_decode_config(context.config)
+        mode = str(config.decode_mode).lower()
         if mode == "robust":
-            bits, spans = self._decode_robust(context)
+            bits, spans = self._decode_robust(context, config)
             if context.max_bits is not None:
                 bits = bits[: context.max_bits]
             return StegoDecodeResult(
@@ -182,7 +215,7 @@ class ARSStrategy:
                 metadata={"algorithm": context.algorithm, "decode_mode": "robust", "spans": spans},
             )
 
-        bits, strings_per_bit = self._decode_regular(context)
+        bits, strings_per_bit = self._decode_regular(context, config)
         if context.max_bits is not None:
             bits = bits[: context.max_bits]
         return StegoDecodeResult(
@@ -191,10 +224,10 @@ class ARSStrategy:
             metadata={"algorithm": context.algorithm, "decode_mode": "regular", "strings_per_bit": strings_per_bit},
         )
 
-    def _decode_regular(self, context: StegoDecodeContext) -> tuple[str, list[str]]:
-        secure_parameter = int(self._get_extra(context, "secure_parameter", 32))
-        func_type = int(self._get_extra(context, "func_type", 0))
-        seed = str(self._get_extra(context, "seed", "12345"))
+    def _decode_regular(self, context: StegoDecodeContext, config: ARSDecodeConfig) -> tuple[str, list[str]]:
+        secure_parameter = int(config.secure_parameter)
+        func_type = int(config.func_type)
+        seed = str(config.seed)
         threshold = 2 ** (-secure_parameter)
         length = self._bit_length(context.tokenizer)
 
@@ -252,11 +285,11 @@ class ARSStrategy:
             return bit, idx + 1
         return "", len(output_bits)
 
-    def _decode_robust(self, context: StegoDecodeContext) -> tuple[str, list[dict[str, Any]]]:
-        secure_parameter = int(self._get_extra(context, "secure_parameter", 32))
-        func_type = int(self._get_extra(context, "func_type", 0))
-        seed = str(self._get_extra(context, "seed", "12345"))
-        search_window = int(self._get_extra(context, "robust_search_window", 1000))
+    def _decode_robust(self, context: StegoDecodeContext, config: ARSDecodeConfig) -> tuple[str, list[dict[str, Any]]]:
+        secure_parameter = int(config.secure_parameter)
+        func_type = int(config.func_type)
+        seed = str(config.seed)
+        search_window = int(config.robust_search_window)
         threshold = 2 ** (-secure_parameter)
         length = self._bit_length(context.tokenizer)
 

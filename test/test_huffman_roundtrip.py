@@ -5,7 +5,15 @@ import unittest
 
 import torch
 
-from stegokit import StegoAlgorithm, StegoDecodeContext, StegoDispatcher, StegoEncodeContext
+from stegokit import (
+    GenerationConfig,
+    HuffmanConfig,
+    RuntimeContext,
+    StegoAlgorithm,
+    StegoDecodeContext,
+    StegoDispatcher,
+    StegoEncodeContext,
+)
 from stegokit.algo.huffman.huffman import _build_huffman_codes
 
 
@@ -65,35 +73,45 @@ class TestHuffmanRoundTrip(unittest.TestCase):
             {"role": "user", "content": "Explain steganography briefly."},
         ]
         secret_bits = "01001101" * 24
-
-        enc = dispatcher.dispatch_encode(
-            StegoEncodeContext(
-                algorithm=StegoAlgorithm.HUFFMAN,
-                model=model,
-                tokenizer=tokenizer,
-                secret_bits=secret_bits,
-                messages=messages,
+        runtime = RuntimeContext(
+            model=model,
+            tokenizer=tokenizer,
+            messages=messages,
+            generation=GenerationConfig(
                 max_new_tokens=64,
                 temperature=1.0,
                 top_k=16,
                 precision=16,
                 stop_on_eos=False,
-                extra={"bit_num": 3},
+            ),
+        )
+        decode_runtime = RuntimeContext(
+            model=model,
+            tokenizer=tokenizer,
+            messages=messages,
+            generation=GenerationConfig(
+                temperature=1.0,
+                top_k=16,
+                precision=16,
+            ),
+        )
+
+        enc = dispatcher.dispatch_encode(
+            StegoEncodeContext(
+                algorithm=StegoAlgorithm.HUFFMAN,
+                runtime=runtime,
+                secret_bits=secret_bits,
+                config=HuffmanConfig(bit_num=3),
             )
         )
 
         dec = dispatcher.dispatch_decode(
             StegoDecodeContext(
                 algorithm=StegoAlgorithm.HUFFMAN,
-                model=model,
-                tokenizer=tokenizer,
+                runtime=decode_runtime,
                 generated_token_ids=enc.generated_token_ids,
-                messages=messages,
-                temperature=1.0,
-                top_k=16,
-                precision=16,
                 max_bits=enc.consumed_bits,
-                extra={"bit_num": 3},
+                config=HuffmanConfig(bit_num=3),
             )
         )
 

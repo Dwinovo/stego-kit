@@ -13,9 +13,9 @@ from stegokit.algo.common import (
     bits2int,
     int2bits,
     num_same_from_beg,
-    require_prg_method,
     to_sorted_tensors,
 )
+from stegokit.core.security_material import require_bitmask_material
 from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
 from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
 
@@ -45,9 +45,8 @@ class MeteorStrategy:
                 bit_stream=context.secret_bits,
                 bit_index=bit_index,
                 precision=context.precision,
-                prg=context.prg,
+                material=context.material,
                 cur_interval=cur_interval,
-                extra=context.extra,
             )
             sampled_token_id = er.get("sampled_token_id")
             if sampled_token_id is None:
@@ -111,9 +110,8 @@ class MeteorStrategy:
                 indices=token_indices.tolist(),
                 prev_token_id=int(token_id),
                 precision=context.precision,
-                prg=context.prg,
+                material=context.material,
                 cur_interval=cur_interval,
-                extra=context.extra,
             )
             bits = str(dr.get("bits", ""))
             recovered_parts.append(bits)
@@ -134,8 +132,8 @@ class MeteorStrategy:
             metadata={"algorithm": context.algorithm, "cur_interval": cur_interval, "decoded_steps": decoded_steps},
         )
     @staticmethod
-    def _require_prg(prg):
-        return require_prg_method(prg, "generate_bits", "Meteor strategy")
+    def _require_prg(material):
+        return require_bitmask_material(material, "Meteor strategy")
 
     @staticmethod
     def _prepare_inputs(prob_table: Sequence[float], indices: Sequence[int], precision: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -174,12 +172,11 @@ class MeteorStrategy:
         bit_stream: str,
         bit_index: int,
         precision: int,
-        prg: Any | None,
+        material: Any,
         cur_interval: list[int] | None,
-        extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        del cur_interval, extra
-        prg = self._require_prg(prg)
+        del cur_interval
+        prg = self._require_prg(material)
         prob, indices = self._prepare_inputs(prob_table, indices, precision)
         cum_probs = self._build_cum_probs(prob, precision)
 
@@ -214,12 +211,11 @@ class MeteorStrategy:
         indices: Sequence[int],
         prev_token_id: int,
         precision: int,
-        prg: Any | None,
+        material: Any,
         cur_interval: list[int] | None,
-        extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        del cur_interval, extra
-        prg = self._require_prg(prg)
+        del cur_interval
+        prg = self._require_prg(material)
         prob, indices = self._prepare_inputs(prob_table, indices, precision)
         cum_probs = self._build_cum_probs(prob, precision)
 

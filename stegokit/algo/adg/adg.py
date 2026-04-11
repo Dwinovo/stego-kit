@@ -6,6 +6,7 @@ from typing import Any, Sequence
 import torch
 
 from stegokit.algo.common import _filter_distribution, _prepare_prefix_ids, _stop_on_eos, bit_slice_with_padding
+from stegokit.core.algorithm_config import ADGConfig
 from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
 from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
 
@@ -72,6 +73,12 @@ def _group_distribution(prob: torch.Tensor) -> tuple[tuple[float, list[int]], tu
 class ADGStrategy:
     """Adaptive Dynamic Grouping strategy adapted from adg.py."""
 
+    @staticmethod
+    def _require_config(config: Any) -> ADGConfig:
+        if not isinstance(config, ADGConfig):
+            raise TypeError("ADG strategy requires context.config to be an ADGConfig")
+        return config
+
     def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
         encode_started_at = time.perf_counter()
         prefix_ids = _prepare_prefix_ids(context.messages, context.model, context.tokenizer)
@@ -95,9 +102,7 @@ class ADGStrategy:
                 bit_stream=context.secret_bits,
                 bit_index=bit_index,
                 precision=context.precision,
-                prg=context.prg,
-                cur_interval=None,
-                extra=context.extra,
+                config=self._require_config(context.config),
             )
             sampled_token_id = er.get("sampled_token_id")
             if sampled_token_id is None:
@@ -158,9 +163,7 @@ class ADGStrategy:
                 indices=token_indices.tolist(),
                 prev_token_id=int(token_id),
                 precision=context.precision,
-                prg=context.prg,
-                cur_interval=None,
-                extra=context.extra,
+                config=self._require_config(context.config),
             )
             bits = str(dr.get("bits", ""))
             recovered_parts.append(bits)
@@ -180,17 +183,6 @@ class ADGStrategy:
             metadata={"algorithm": context.algorithm, "decoded_steps": decoded_steps},
         )
 
-    @staticmethod
-    def _resolve_params(extra: dict[str, Any] | None) -> tuple[float, int]:
-        extra = extra or {}
-        epsilon = float(extra.get("epsilon", 0.01))
-        max_bit = int(extra.get("max_bit", 15))
-        if epsilon <= 0:
-            raise ValueError("ADG strategy requires extra['epsilon'] > 0")
-        if max_bit < 1:
-            raise ValueError("ADG strategy requires extra['max_bit'] >= 1")
-        return epsilon, max_bit
-
     def _encode_token_step(
         self,
         *,
@@ -199,12 +191,11 @@ class ADGStrategy:
         bit_stream: str,
         bit_index: int,
         precision: int,
-        prg: Any | None,
-        cur_interval: list[int] | None,
-        extra: dict[str, Any] | None,
+        config: ADGConfig,
     ) -> dict[str, Any]:
-        del precision, prg, cur_interval
-        epsilon, max_bit = self._resolve_params(extra)
+        del precision
+        epsilon = config.epsilon
+        max_bit = config.max_bit
 
         prob = torch.tensor(prob_table, dtype=torch.float64)
         token_indices = torch.tensor(indices, dtype=torch.long)
@@ -243,12 +234,11 @@ class ADGStrategy:
         indices: Sequence[int],
         prev_token_id: int,
         precision: int,
-        prg: Any | None,
-        cur_interval: list[int] | None,
-        extra: dict[str, Any] | None,
+        config: ADGConfig,
     ) -> dict[str, Any]:
-        del precision, prg, cur_interval
-        epsilon, max_bit = self._resolve_params(extra)
+        del precision
+        epsilon = config.epsilon
+        max_bit = config.max_bit
 
         prob = torch.tensor(prob_table, dtype=torch.float64)
         token_indices = torch.tensor(indices, dtype=torch.long)

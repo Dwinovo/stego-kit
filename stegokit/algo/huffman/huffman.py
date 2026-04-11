@@ -7,6 +7,7 @@ from typing import Any, Sequence
 import torch
 
 from stegokit.algo.common import _filter_distribution, _prepare_prefix_ids, _stop_on_eos, bit_slice_with_padding
+from stegokit.core.algorithm_config import HuffmanConfig
 from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
 from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
 
@@ -70,6 +71,12 @@ def _select_top_candidates(
 class HuffmanStrategy:
     """Legacy Huffman top-k coding adapted from RNN-Stega."""
 
+    @staticmethod
+    def _require_config(config: Any) -> HuffmanConfig:
+        if not isinstance(config, HuffmanConfig):
+            raise TypeError("Huffman strategy requires context.config to be a HuffmanConfig")
+        return config
+
     def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
         encode_started_at = time.perf_counter()
         prefix_ids = _prepare_prefix_ids(context.messages, context.model, context.tokenizer)
@@ -93,9 +100,7 @@ class HuffmanStrategy:
                 bit_stream=context.secret_bits,
                 bit_index=bit_index,
                 precision=context.precision,
-                prg=context.prg,
-                cur_interval=None,
-                extra=context.extra,
+                config=self._require_config(context.config),
             )
             sampled_token_id = er.get("sampled_token_id")
             if sampled_token_id is None:
@@ -156,9 +161,7 @@ class HuffmanStrategy:
                 indices=token_indices.tolist(),
                 prev_token_id=int(token_id),
                 precision=context.precision,
-                prg=context.prg,
-                cur_interval=None,
-                extra=context.extra,
+                config=self._require_config(context.config),
             )
             bits = str(dr.get("bits", ""))
             recovered_parts.append(bits)
@@ -179,15 +182,11 @@ class HuffmanStrategy:
         )
 
     @staticmethod
-    def _resolve_candidate_count(available: int, extra: dict[str, Any] | None) -> int:
-        extra = extra or {}
-        if "candidate_count" in extra:
-            candidate_count = int(extra["candidate_count"])
-        elif "bit_num" in extra:
-            bit_num = int(extra["bit_num"])
-            if bit_num < 1:
-                raise ValueError("Huffman strategy requires extra['bit_num'] >= 1")
-            candidate_count = 2 ** bit_num
+    def _resolve_candidate_count(available: int, config: HuffmanConfig) -> int:
+        if config.candidate_count is not None:
+            candidate_count = int(config.candidate_count)
+        elif config.bit_num is not None:
+            candidate_count = 2 ** int(config.bit_num)
         else:
             candidate_count = 8
 
@@ -203,16 +202,14 @@ class HuffmanStrategy:
         bit_stream: str,
         bit_index: int,
         precision: int,
-        prg: Any | None,
-        cur_interval: list[int] | None,
-        extra: dict[str, Any] | None,
+        config: HuffmanConfig,
     ) -> dict[str, Any]:
-        del precision, prg, cur_interval
+        del precision
         available = min(len(prob_table), len(indices))
         if available == 0:
             raise ValueError("Huffman strategy requires a non-empty token distribution")
 
-        candidate_count = self._resolve_candidate_count(available, extra)
+        candidate_count = self._resolve_candidate_count(available, config)
         candidate_ids, candidate_probs = _select_top_candidates(prob_table, indices, candidate_count)
         if len(candidate_ids) == 1:
             return {
@@ -249,16 +246,14 @@ class HuffmanStrategy:
         indices: Sequence[int],
         prev_token_id: int,
         precision: int,
-        prg: Any | None,
-        cur_interval: list[int] | None,
-        extra: dict[str, Any] | None,
+        config: HuffmanConfig,
     ) -> dict[str, Any]:
-        del precision, prg, cur_interval
+        del precision
         available = min(len(prob_table), len(indices))
         if available == 0:
             return {"bits": "", "bits_len": 0}
 
-        candidate_count = self._resolve_candidate_count(available, extra)
+        candidate_count = self._resolve_candidate_count(available, config)
         candidate_ids, candidate_probs = _select_top_candidates(prob_table, indices, candidate_count)
         codes = _build_huffman_codes(candidate_probs)
         token_to_code = {int(token_id): code for token_id, code in zip(candidate_ids, codes)}

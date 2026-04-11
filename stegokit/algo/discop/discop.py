@@ -85,9 +85,7 @@ class DiscopStrategy(DiscopCommonMixin):
                 bit_stream=context.secret_bits,
                 bit_index=bit_index,
                 precision=context.precision,
-                prg=context.prg,
-                cur_interval=cur_interval,
-                extra=context.extra,
+                material=context.material,
             )
             sampled_token_id = er.get("sampled_token_id")
             if sampled_token_id is None:
@@ -151,9 +149,7 @@ class DiscopStrategy(DiscopCommonMixin):
                 indices=token_indices.tolist(),
                 prev_token_id=int(token_id),
                 precision=context.precision,
-                prg=context.prg,
-                cur_interval=cur_interval,
-                extra=context.extra,
+                material=context.material,
             )
             bits = str(dr.get("bits", ""))
             recovered_parts.append(bits)
@@ -241,12 +237,9 @@ class DiscopStrategy(DiscopCommonMixin):
         bit_stream: str,
         bit_index: int,
         precision: int,
-        prg: Any | None,
-        cur_interval: list[int] | None,
-        extra: dict[str, Any] | None,
+        material: Any,
     ) -> dict[str, Any]:
-        del cur_interval, extra
-        prg = self._require_prg(prg)
+        prg = self._require_prg(material)
         probs_list, indices_list = self._prepare_inputs(prob_table, indices)
 
         bits_slice = bit_slice_with_padding(bit_stream, bit_index, precision)
@@ -268,12 +261,9 @@ class DiscopStrategy(DiscopCommonMixin):
         indices: Sequence[int],
         prev_token_id: int,
         precision: int,
-        prg: Any | None,
-        cur_interval: list[int] | None,
-        extra: dict[str, Any] | None,
+        material: Any,
     ) -> dict[str, Any]:
-        del cur_interval, extra
-        prg = self._require_prg(prg)
+        prg = self._require_prg(material)
         probs_list, indices_list = self._prepare_inputs(prob_table, indices)
         stego_t = int(prev_token_id)
         bits = self._decode_step(indices_list, probs_list, stego_t, prg, precision)

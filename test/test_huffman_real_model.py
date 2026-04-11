@@ -14,8 +14,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from stegokit.core.algorithm_enum import StegoAlgorithm
-from stegokit.core.stego_dispatcher import StegoDispatcher
+from stegokit import HuffmanConfig, StegoAlgorithm, StegoDispatcher
 
 
 def generate_secret_bits(length: int, seed: int) -> str:
@@ -116,11 +115,10 @@ def run_case(
         secret_len = approx_bits_per_token * max_new_tokens + 32
     secret_bits = generate_secret_bits(secret_len, secret_seed)
 
-    extra: dict[str, int] = {}
-    if candidate_count is not None:
-        extra["candidate_count"] = int(candidate_count)
-    elif bit_num is not None:
-        extra["bit_num"] = int(bit_num)
+    config = HuffmanConfig(
+        candidate_count=int(candidate_count) if candidate_count is not None else None,
+        bit_num=int(bit_num) if bit_num is not None else None,
+    )
 
     enc = dispatcher.embed(
         algorithm=StegoAlgorithm.HUFFMAN,
@@ -134,7 +132,7 @@ def run_case(
         top_p=top_p,
         precision=precision,
         stop_on_eos=stop_on_eos,
-        extra=extra,
+        config=config,
     )
 
     dec = dispatcher.extract(
@@ -148,7 +146,7 @@ def run_case(
         top_p=top_p,
         precision=precision,
         max_bits=enc.consumed_bits,
-        extra=extra,
+        config=config,
     )
 
     used_secret = secret_bits[: enc.consumed_bits]
@@ -173,14 +171,14 @@ def run_case(
         "generated_text": enc.text,
         "used_secret": used_secret,
         "decoded_secret": decoded,
-        "extra": extra,
+        "config": config,
     }
 
 
 def print_result(result: dict) -> None:
     print("\n===== HUFFMAN Real-Model Result =====")
     print(f"model: {result['model_path']}")
-    print(f"extra: {result['extra']}")
+    print(f"config: {result['config']}")
     print(
         f"tokens={result['tokens']} consumed_bits={result['consumed_bits']} "
         f"decoded_bits={result['decoded_bits']} compared_bits={result['compared_bits']}"

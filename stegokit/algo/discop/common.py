@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from stegokit.algo.common import require_prg_method, to_sorted_tensors
+from stegokit.core.security_material import require_randomness_material
+from stegokit.algo.common import to_sorted_tensors
 
 
 class DiscopCommonMixin:
@@ -10,5 +11,5 @@ class DiscopCommonMixin:
         return prob.tolist(), token_indices.tolist()
 
     @staticmethod
-    def _require_prg(prg):
-        return require_prg_method(prg, "generate_random", "Discop strategy")
+    def _require_prg(material):
+        return require_randomness_material(material, "Discop strategy")
