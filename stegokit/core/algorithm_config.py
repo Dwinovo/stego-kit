@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
-class ACConfig:
+class NoConfig:
     pass
 
 
@@ -18,37 +18,6 @@ class ADGConfig:
             raise ValueError("ADGConfig.epsilon must be > 0")
         if self.max_bit < 1:
             raise ValueError("ADGConfig.max_bit must be >= 1")
-
-
-@dataclass(frozen=True, slots=True)
-class DiscopConfig:
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class DiscopBaseConfig:
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class FDPSSDifferentialBasedConfig:
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class FDPSSBinaryBasedConfig:
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class FDPSSStabilityBasedConfig:
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class MeteorConfig:
-    pass
-
 
 @dataclass(frozen=True, slots=True)
 class HuffmanConfig:
@@ -86,8 +55,3 @@ class ARSDecodeConfig(ARSEncodeConfig):
             raise ValueError("ARSDecodeConfig.decode_mode must be 'regular' or 'robust'")
         if self.robust_search_window < 1:
             raise ValueError("ARSDecodeConfig.robust_search_window must be >= 1")
-
-
-@dataclass(frozen=True, slots=True)
-class NoConfig:
-    pass

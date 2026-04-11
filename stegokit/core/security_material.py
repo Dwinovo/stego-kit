@@ -29,18 +29,6 @@ class BitMaskMaterial:
     prg: SupportsGenerateBits | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class AsymmetricEncodeMaterial:
-    public_context: Any | None = None
-    sender_state: Any | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AsymmetricDecodeMaterial:
-    private_context: Any | None = None
-    receiver_state: Any | None = None
-
-
 def require_randomness_material(material: Any, strategy_name: str) -> SupportsGenerateRandom:
     if not isinstance(material, RandomnessMaterial):
         raise TypeError(f"{strategy_name} requires RandomnessMaterial")

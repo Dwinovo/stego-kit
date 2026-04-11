@@ -1,89 +1,193 @@
 # StegoKit
 
-StegoKit 是一个面向大语言模型（LLM）的生成式隐写工具包，提供统一的编码/解码调度接口，并内置多种经典隐写策略实现。
+StegoKit 是一个面向大语言模型（LLM）的生成式隐写工具包。它做的事情很简单：
 
-项目核心目标：
-- 统一不同隐写算法的调用方式（同一套上下文结构 + 分发接口）
-- 便于研究和复现实验（可控随机源、可切换策略、可扩展注册）
-- 兼容 Hugging Face `transformers` 因果语言模型推理流程；当前要求 tokenizer 支持并配置 `chat_template`
+- 编码：把 `0/1` 比特串嵌入到模型生成过程中
+- 解码：从生成出的 token 序列里把比特串提取出来
 
-## 特性
+这个项目的目标不是只实现某一篇论文，而是给不同隐写算法提供一套统一调用方式，方便你做实验、对比算法和接入新策略。
 
-- 统一调度器：`StegoDispatcher`
-- 内置 10 种算法策略：`AC / ADG / DISCOP / DISCOP_BASE / HUFFMAN / METEOR / ARS / FDPSS_DIFFERENTIAL_BASED / FDPSS_BINARY_BASED / FDPSS_STABILITY_BASED`
-- 标准结果对象：
-  - `StegoEncodeResult`（`generated_token_ids`、`consumed_bits`、`text`、`encode_time_seconds`、`embedding_capacity`、`metadata`）
-  - `StegoDecodeResult`（`bits`、`decode_time_seconds`、`metadata`）
-- 可插拔安全材料：支持通过 `RandomnessMaterial` / `BitMaskMaterial` 注入 `PRG`（`stegokit/utils/prg.py`）
-- 可扩展算法注册：支持自定义策略并通过注册表调用
+## 30 秒跑起来
 
-## 目录结构
+如果你第一次接触 StegoKit，建议先用 `AC` 算法，因为它不需要额外的 `config` 或 `material`。
 
-```text
-stego-kit/
-├── README.md
-├── pyproject.toml
-└── stegokit/
-    ├── __init__.py                # 对外导出 API
-    ├── core/
-    │   ├── algorithm_config.py    # 内置算法 typed config
-    │   ├── algorithm_enum.py      # 内置算法枚举
-    │   ├── algorithm_spec.py      # 算法描述与注册元数据
-    │   ├── generation_config.py   # 生成参数配置
-    │   ├── runtime_context.py     # model/tokenizer/messages/runtime
-    │   ├── security_material.py   # typed 安全材料
-    │   ├── stego_algorithm.py     # 策略协议与结果结构
-    │   ├── stego_context.py       # 编码/解码上下文
-    │   ├── stego_dispatcher.py    # 统一调度入口
-    │   ├── stego_paradigm.py      # symmetric / asymmetric 分类
-    │   └── stego_registry.py      # 算法注册表（内置 + 自定义）
-    ├── algo/
-    │   ├── ac/ac.py
-    │   ├── adg/adg.py
-    │   ├── discop/discop.py
-    │   ├── discop/discop_base.py
-    │   ├── huffman/huffman.py
-    │   ├── meteor/meteor.py
-    │   ├── ars/ars.py
-    │   └── fdpss/
-    │       ├── differential_based.py
-    │       ├── binary_based.py
-    │       └── stability_based.py
-    └── utils/prg.py               # HMAC-DRBG 风格 PRG
-```
-
-## 环境要求
-
-- Python >= 3.10
-- 建议使用 CUDA 环境（CPU 也可运行，但速度较慢）
-
-项目代码依赖以下第三方库：
-- `torch`
-- `transformers`
-- `numpy`
-
-## 安装
+### 1) 安装
 
 ```bash
-# 1) 克隆项目
 git clone <your-repo-url>
 cd stego-kit
-
-# 2) 安装本项目（开发模式）
 pip install -e .
 ```
 
-如果你需要自行控制 `torch` 的 CUDA 轮子来源，可以先按你的环境安装 `torch`，再执行 `pip install -e .`。
+如果你需要自行安装 CUDA 版本的 `torch`，先按你的环境安装好 `torch`，再执行 `pip install -e .`。
 
-## 快速开始
+### 2) 最简可运行示例
 
-### 1) 基础用法（构建 `runtime/config/material` + 分发器）
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from stegokit import StegoAlgorithm, StegoDispatcher
+
+model_name = "<chat-model-with-chat-template>"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name)
+
+if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+    tokenizer.pad_token = tokenizer.eos_token
+if not getattr(tokenizer, "chat_template", None):
+    raise ValueError("StegoKit expects tokenizer.chat_template to be configured.")
+
+dispatcher = StegoDispatcher(verbose=True)
+messages = [{"role": "user", "content": "Write a short paragraph about privacy."}]
+
+enc = dispatcher.embed(
+    algorithm=StegoAlgorithm.AC,
+    model=model,
+    tokenizer=tokenizer,
+    secret_bits="010101001011",
+    messages=messages,
+    max_new_tokens=64,
+    temperature=1.0,
+    top_k=50,
+    precision=16,
+)
+
+dec = dispatcher.extract(
+    algorithm=StegoAlgorithm.AC,
+    model=model,
+    tokenizer=tokenizer,
+    generated_token_ids=enc.generated_token_ids,
+    messages=messages,
+    temperature=1.0,
+    top_k=50,
+    precision=16,
+    max_bits=enc.consumed_bits,
+)
+
+print("generated text:", enc.text)
+print("embedded bits:", enc.consumed_bits)
+print("decoded bits:", dec.bits)
+```
+
+### 3) 你只需要先记住这一条
+
+不同算法对“编码参数和解码参数是否需要保持一致”的要求并不完全相同。实际使用时，以具体算法的设计和实验设置为准。
+
+如果你能先把上面的最简例子跑通，再回来看下面的参数说明，会轻松很多。
+
+## 三层参数模型
+
+StegoKit 现在把参数分成 3 层。理解这 3 层，就基本理解了整个框架。
+
+| 层 | 作用 | 典型内容 |
+|---|---|---|
+| `GenerationConfig` | 所有算法共享的生成参数 | `temperature`、`top_k`、`top_p`、`precision`、`stop_on_eos`、`max_new_tokens` |
+| `config` | 某个算法自己的逻辑参数 | 例如 ADG 的 `epsilon`，Huffman 的 `bit_num` |
+| `material` | 算法依赖的外部安全资源 | 例如 `PRG`、bit mask |
+
+可以把它们理解成 3 个问题：
+
+1. 模型应该怎么生成？
+答案在 `GenerationConfig`。
+
+2. 这个算法内部该怎么工作？
+答案在算法自己的 `config`。
+
+3. 这个算法运行时还需要什么额外资源？
+答案在 `material`。
+
+### 1) `GenerationConfig` 是什么
+
+`GenerationConfig` 是所有算法共用的生成控制参数，定义在 [generation_config.py](/root/autodl-tmp/stego-kit/stegokit/core/generation_config.py)。
+
+它包含：
+
+- `temperature`
+- `top_k`
+- `top_p`
+- `precision`
+- `stop_on_eos`
+- `max_new_tokens`
+
+这些参数不属于某一个具体算法，而是“模型在生成时怎么采样”的通用设置。
+
+一句话记忆：
+
+- 只要是所有算法都会关心的生成参数，就放 `GenerationConfig`
+
+### 2) `config` 是什么
+
+`config` 是某个算法自己的参数，也就是“这个算法的旋钮”。
+
+例如：
+
+- `ADGConfig(epsilon=0.03, max_bit=8)`
+- `HuffmanConfig(bit_num=3)`
+- `ARSDecodeConfig(decode_mode="robust", robust_search_window=1000)`
+
+一句话记忆：
+
+- 如果这个参数只对某一个算法有意义，就放它自己的 `config`
+
+### 3) `material` 是什么
+
+`material` 是算法运行时依赖的外部资源，定义在 [security_material.py](/root/autodl-tmp/stego-kit/stegokit/core/security_material.py)。
+
+当前内置算法真正会用到的 `material` 只有三种：
+
+- `NoMaterial()`：不需要额外资源
+- `RandomnessMaterial(prg=PRG.from_int_seed(...))`：需要 `generate_random`
+- `BitMaskMaterial(prg=PRG.from_int_seed(...))`：需要 `generate_bits`
+
+一句话记忆：
+
+- 如果它更像“资源对象”而不是“算法旋钮”，就放到 `material`
+
+## 哪些算法需要什么
+
+下面这张表是最实用的速查表。
+
+| 算法 | 枚举值 | `config` | `material` | 适合什么时候先用 |
+|---|---|---|---|---|
+| Arithmetic Coding | `ac` | `NoConfig()` | `NoMaterial()` | 第一次跑通框架 |
+| ADG | `adg` | `ADGConfig` | `NoMaterial()` | 想调节动态分组参数 |
+| Discop | `discop` | `NoConfig()` | `RandomnessMaterial` | 需要 PRG 驱动的随机性 |
+| Discop Base | `discop_base` | `NoConfig()` | `RandomnessMaterial` | Discop 基线 |
+| Huffman | `huffman` | `HuffmanConfig` | `NoMaterial()` | 想控制候选集合大小 |
+| Meteor | `meteor` | `NoConfig()` | `BitMaskMaterial` | 需要 bit mask |
+| ARS | `ars` | `ARSEncodeConfig` / `ARSDecodeConfig` | `NoMaterial()` | 想测试 ARS 的 regular / robust 解码 |
+| FDPSS Differential Based | `fdpss_differential_based` | `NoConfig()` | `RandomnessMaterial` | FDPSS 变体之一 |
+| FDPSS Binary Based | `fdpss_binary_based` | `NoConfig()` | `RandomnessMaterial` | FDPSS 变体之一 |
+| FDPSS Stability Based | `fdpss_stability_based` | `NoConfig()` | `RandomnessMaterial` | FDPSS 变体之一 |
+
+说明：FDPSS 系列当前只接受这 3 个名称：
+
+- `fdpss_differential_based`
+- `fdpss_binary_based`
+- `fdpss_stability_based`
+
+旧名称 `differential_based` / `binary_based` / `stability_based` 已移除。
+
+## 从最简调用到进阶调用
+
+### 最简单的调用方式：`embed` / `extract`
+
+如果你只是想先跑通，用：
+
+- `dispatcher.embed(...)`
+- `dispatcher.extract(...)`
+
+这两个便捷方法就够了。它们会自动帮你构造 `RuntimeContext`，也会在需要时自动补默认的 `NoConfig()` / `NoMaterial()`。
+
+### 进阶调用方式：显式构造 `RuntimeContext`
+
+如果你想把“运行时参数”和“算法参数”彻底分开，推荐用 `RuntimeContext`。
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from stegokit import (
-    ACConfig,
+    ADGConfig,
     GenerationConfig,
     NoMaterial,
     RuntimeContext,
@@ -97,211 +201,170 @@ model_name = "<chat-model-with-chat-template>"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(model_name)
 
-if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
-    tokenizer.pad_token = tokenizer.eos_token
-if not getattr(tokenizer, "chat_template", None):
-    raise ValueError("StegoKit currently expects tokenizer.chat_template to be configured.")
-
 dispatcher = StegoDispatcher(verbose=True)
-messages = [{"role": "user", "content": "Write a short paragraph about privacy."}]
+messages = [{"role": "user", "content": "Explain steganography briefly."}]
+
 runtime = RuntimeContext(
     model=model,
     tokenizer=tokenizer,
     messages=messages,
     generation=GenerationConfig(
-        max_new_tokens=64,
+        max_new_tokens=32,
         temperature=1.0,
-        top_k=50,
+        top_k=32,
         precision=16,
     ),
 )
 
-enc_ctx = StegoEncodeContext(
-    algorithm=StegoAlgorithm.AC,
-    runtime=runtime,
-    secret_bits="010101001011",
-    config=ACConfig(),
-    material=NoMaterial(),
+enc = dispatcher.dispatch_encode(
+    StegoEncodeContext(
+        algorithm=StegoAlgorithm.ADG,
+        runtime=runtime,
+        secret_bits="010101001011",
+        config=ADGConfig(epsilon=0.03, max_bit=8),
+        material=NoMaterial(),
+    )
 )
-enc = dispatcher.dispatch_encode(enc_ctx)
 
-# 解码时必须保持同样的模型与采样参数
-dec_ctx = StegoDecodeContext(
-    algorithm=StegoAlgorithm.AC,
-    runtime=RuntimeContext(
-        model=model,
-        tokenizer=tokenizer,
-        messages=messages,
-        generation=GenerationConfig(
-            temperature=1.0,
-            top_k=50,
-            precision=16,
+dec = dispatcher.dispatch_decode(
+    StegoDecodeContext(
+        algorithm=StegoAlgorithm.ADG,
+        runtime=RuntimeContext(
+            model=model,
+            tokenizer=tokenizer,
+            messages=messages,
+            generation=GenerationConfig(
+                temperature=1.0,
+                top_k=32,
+                precision=16,
+            ),
         ),
-    ),
-    generated_token_ids=enc.generated_token_ids,
-    max_bits=enc.consumed_bits,
-    config=ACConfig(),
-    material=NoMaterial(),
+        generated_token_ids=enc.generated_token_ids,
+        max_bits=enc.consumed_bits,
+        config=ADGConfig(epsilon=0.03, max_bit=8),
+        material=NoMaterial(),
+    )
 )
-dec = dispatcher.dispatch_decode(dec_ctx)
-
-print("generated:", enc.text)
-print("embedded bits:", enc.consumed_bits)
-print("encode time(s):", enc.encode_time_seconds)
-print("capacity(bit/token):", enc.embedding_capacity)
-print("decoded bits:", dec.bits)
-print("decode time(s):", dec.decode_time_seconds)
 ```
 
-### 2) 便捷封装（`embed` / `extract`）
+### 什么时候需要 `RandomnessMaterial`
 
-如果你不想手动构建上下文，也可以直接调用便捷封装：
+`Discop` 和 `FDPSS` 系列需要 `RandomnessMaterial`。最常见的写法是：
 
 ```python
-enc = dispatcher.embed(
-    algorithm=StegoAlgorithm.AC,
-    model=model,
-    tokenizer=tokenizer,
-    secret_bits="010101001011",
-    messages=messages,
-    max_new_tokens=64,
-    temperature=1.0,
-    top_k=50,
-    precision=16,
-    config=ACConfig(),
-    material=NoMaterial(),
-)
+from stegokit import NoConfig, PRG, RandomnessMaterial
 
-dec = dispatcher.extract(
-    algorithm=StegoAlgorithm.AC,
-    model=model,
-    tokenizer=tokenizer,
-    generated_token_ids=enc.generated_token_ids,
-    messages=messages,
-    temperature=1.0,
-    top_k=50,
-    precision=16,
-    max_bits=enc.consumed_bits,
-    config=ACConfig(),
-    material=NoMaterial(),
-)
+material = RandomnessMaterial(prg=PRG.from_int_seed(2026))
+config = NoConfig()
 ```
 
-## 内置算法一览
+编码和解码时要使用同样的 PRG 初始化参数，否则无法正确恢复比特串。
 
-| 算法 | 枚举值 | Material 类型 | 说明 |
-|---|---|---|---|
-| Arithmetic Coding | `ac` | `NoMaterial` | 基于区间编码的隐写策略 |
-| ADG | `adg` | `NoMaterial` | 基于接近 0.5/0.5 的递归动态分组进行 bit 嵌入 |
-| Discop | `discop` | `RandomnessMaterial` | 基于 Huffman 树与随机路径 |
-| Discop Base | `discop_base` | `RandomnessMaterial` | Discop 的基线版本 |
-| Huffman | `huffman` | `NoMaterial` | 取 top `2^bit_num` 候选并按 Huffman 前缀码嵌入 bit 串 |
-| Meteor | `meteor` | `BitMaskMaterial` | 掩码比特参与编码/解码 |
-| ARS | `ars` | `AsymmetricEncodeMaterial` / `AsymmetricDecodeMaterial` | 支持 `regular` 与 `robust` 两种解码 |
-| FDPSS Differential Based | `fdpss_differential_based` | `RandomnessMaterial` | FDPSS 系列策略之一 |
-| FDPSS Binary Based | `fdpss_binary_based` | `RandomnessMaterial` | FDPSS 系列策略之一 |
-| FDPSS Stability Based | `fdpss_stability_based` | `RandomnessMaterial` | FDPSS 系列策略之一 |
+### 什么时候需要 `BitMaskMaterial`
 
-说明：FDPSS 系列当前仅接受 `fdpss_differential_based`、`fdpss_binary_based`、`fdpss_stability_based` 这 3 个名称；旧名称 `differential_based` / `binary_based` / `stability_based` 已移除。
+`Meteor` 需要 `BitMaskMaterial`：
 
-## 参数说明
+```python
+from stegokit import BitMaskMaterial, NoConfig, PRG
 
-### 通用字段（`StegoEncodeContext` / `StegoDecodeContext`）
+config = NoConfig()
+material = BitMaskMaterial(prg=PRG.from_int_seed(2026))
+```
 
-- `algorithm`: `StegoAlgorithm` 枚举或自定义算法名字符串
-- `runtime`: `RuntimeContext`
-- `config`: 算法特定配置对象
-- `material`: 安全材料对象
-- 编码侧额外字段：
-  - `secret_bits`: 待嵌入 bit 串
-- 解码侧额外字段：
-  - `generated_token_ids`: 待提取的生成 token 序列
-  - `max_bits`: 最多提取多少个 bit（可选）
+## 重要参数说明
 
 ### `RuntimeContext`
 
-- `model`, `tokenizer`: Hugging Face 因果 LM 与对应 tokenizer
-- `tokenizer` 需要支持 `apply_chat_template`，且应已配置 `chat_template`
-- `messages`: 对话消息列表（每项至少包含 `role`，并包含 `content` 或 `tool_calls`）
-- `generation`: `GenerationConfig`
+`RuntimeContext` 定义在 [runtime_context.py](/root/autodl-tmp/stego-kit/stegokit/core/runtime_context.py)，包含：
 
-### `GenerationConfig`
+- `model`
+- `tokenizer`
+- `messages`
+- `generation`
 
-- `temperature`, `top_k`, `top_p`: 采样控制
-- `precision`: 隐写相关精度参数（>0）
-- `stop_on_eos`: 是否在生成到 `eos_token` 时停止
-- `max_new_tokens`: 最多生成多少个 token（仅编码侧实际使用）
+其中：
 
-说明：`embed` / `extract` 仍可用，它们会自动构造 `RuntimeContext`，也支持直接传入 `config` 与 `material`。
+- `model` / `tokenizer` 应该来自 Hugging Face `transformers`
+- `tokenizer` 需要支持 `apply_chat_template`
+- `messages` 必须是对话消息列表，每条消息至少要有 `role`，并包含 `content` 或 `tool_calls`
 
-### ARS 的 `config` 类型
+### `ADGConfig`
 
-- 编码：`ARSEncodeConfig`
-  - `seed`（默认 `"12345"`）
-  - `secure_parameter`（默认 `32`）
-  - `func_type`（默认 `0`，支持 `0/1/2`）
-- 解码：`ARSDecodeConfig`
-  - 继承编码配置字段
-  - `decode_mode`: `"regular"` 或 `"robust"`
-  - `robust_search_window`（默认 `1000`，仅 robust 模式）
+定义在 [algorithm_config.py](/root/autodl-tmp/stego-kit/stegokit/core/algorithm_config.py)。
 
-### ADG 的 `config` 类型
+- `epsilon`：判断动态分组是否足够接近 `0.5 / 0.5`
+- `max_bit`：单个 token 最多消费多少 bit
 
-- `ADGConfig`
-  - `epsilon`: 判断分组是否足够接近 `0.5/0.5` 的阈值，默认 `0.01`
-  - `max_bit`: 单个 token 最多可消费的 bit 数，默认 `15`
+### `HuffmanConfig`
 
-### Huffman 的 `config` 类型
+定义在 [algorithm_config.py](/root/autodl-tmp/stego-kit/stegokit/core/algorithm_config.py)。
 
-- `HuffmanConfig`
-  - `bit_num`: 候选集合大小控制参数，实际候选数为 `2 ** bit_num`
-  - `candidate_count`: 直接指定候选数；若提供则优先于 `bit_num`
-  - 若两者都不传，当前默认使用 `8` 个候选 token
+- `bit_num`：候选大小为 `2 ** bit_num`
+- `candidate_count`：直接指定候选数量；如果传了它，就优先使用它
 
-### 常见 `material` 类型
+### `ARSEncodeConfig` / `ARSDecodeConfig`
 
-- `NoMaterial`: 不需要额外安全材料
-- `RandomnessMaterial(prg=PRG.from_int_seed(...))`: 适用于 `Discop` / `FDPSS` 等依赖 `generate_random` 的算法
-- `BitMaskMaterial(prg=PRG.from_int_seed(...))`: 适用于 `Meteor`
-- `AsymmetricEncodeMaterial` / `AsymmetricDecodeMaterial`: 适用于 `ARS` 和未来的非对称隐写算法
+定义在 [algorithm_config.py](/root/autodl-tmp/stego-kit/stegokit/core/algorithm_config.py)。
+
+编码侧：
+
+- `seed`
+- `secure_parameter`
+- `func_type`
+
+解码侧额外增加：
+
+- `decode_mode`：`regular` 或 `robust`
+- `robust_search_window`
+
+说明：当前 ARS 实现不需要额外 `material`，只需要它自己的 `config`。
 
 ## 结果对象
 
 编码返回 `StegoEncodeResult`：
-- `generated_token_ids`: 生成的 token id 序列
-- `consumed_bits`: 实际嵌入的 bit 数
-- `text`: 生成出的文本（由 `generated_token_ids` 解码得到）
-- `encode_time_seconds`: 编码耗时（秒）
-- `embedding_capacity`: 平均每个生成 token 嵌入 bit 数（`consumed_bits / len(generated_token_ids)`）
-- `metadata`: 算法附加信息（如步骤数、内部状态等）
+
+- `generated_token_ids`：生成出的 token id 序列
+- `consumed_bits`：实际嵌入的 bit 数
+- `text`：由 `generated_token_ids` 解码得到的文本
+- `encode_time_seconds`：编码耗时
+- `embedding_capacity`：平均每个 token 嵌入多少 bit
+- `metadata`：算法附加信息
 
 解码返回 `StegoDecodeResult`：
-- `bits`: 提取出的 bit 串
-- `decode_time_seconds`: 解码耗时（秒）
-- `metadata`: 附加信息（如解码模式、步数等）
+
+- `bits`：提取出的 bit 串
+- `decode_time_seconds`：解码耗时
+- `metadata`：算法附加信息
 
 ## 自定义算法扩展
 
-实现 `StegoStrategy` 协议（`encode` / `decode`），并注册 `AlgorithmSpec` 后即可被 `dispatcher` 调用。
+如果你要接入自己的算法，实现 `StegoStrategy` 协议，然后注册一个 `AlgorithmSpec` 即可。
 
 ```python
 from stegokit import (
     AlgorithmSpec,
     NoConfig,
     NoMaterial,
-    StegoParadigm,
     StegoAlgorithmRegistry,
+    StegoDecodeResult,
     StegoDispatcher,
     StegoEncodeResult,
-    StegoDecodeResult,
+    StegoParadigm,
 )
+
 
 class MyStrategy:
     def encode(self, context):
-        return StegoEncodeResult(generated_token_ids=[], consumed_bits=0, text="", metadata={"name": "my_algo"})
+        return StegoEncodeResult(
+            generated_token_ids=[],
+            consumed_bits=0,
+            text="",
+            metadata={"name": "my_algo"},
+        )
 
     def decode(self, context):
         return StegoDecodeResult(bits="", metadata={"name": "my_algo"})
+
 
 registry = StegoAlgorithmRegistry.default()
 registry.register_spec(
@@ -315,26 +378,31 @@ registry.register_spec(
         decode_material_type=NoMaterial,
     )
 )
-dispatcher = StegoDispatcher(registry=registry)
 
-# 之后可直接使用 algorithm="my_algo"
+dispatcher = StegoDispatcher(registry=registry)
 ```
 
 ## 使用注意事项
 
-- 编码与解码必须保持同一组关键条件：
-  - 相同模型与 tokenizer
-  - 相同 messages（内容与顺序）
-  - 相同采样参数（`temperature` / `top_k` / `top_p` / `precision`）
-  - 对要求随机材料的算法，必须使用一致的 `material` 初始化参数
-- `secret_bits` 必须是仅包含 `0/1` 的字符串
-- 某些算法对分布和精度敏感，`top_k/top_p/temperature` 变化会直接影响可解码性
-- 当前项目偏研究与实验用途，建议在你的任务数据上进行鲁棒性评估
+- `secret_bits` 必须是只包含 `0` 和 `1` 的字符串
+- 编码和解码的参数约束取决于具体算法，不要默认所有算法都要求完全相同的设置
+- 某些算法对 `temperature` / `top_k` / `top_p` / `precision` 很敏感，稍微变动就可能导致无法正确解码
+- 当前项目更偏研究和实验用途，建议你在自己的数据和模型上做单独评估
 
-## 开发建议
+## 开发者说明
 
-- 若要增加可复现实验，建议固定：随机种子、模型版本、采样参数、messages 模板
-- 可在 `metadata` 中额外记录实验配置，便于后续分析
+项目对外 API 主要在：
+
+- [stegokit/__init__.py](/root/autodl-tmp/stego-kit/stegokit/__init__.py)
+- [stegokit/core](/root/autodl-tmp/stego-kit/stegokit/core)
+- [stegokit/algo](/root/autodl-tmp/stego-kit/stegokit/algo)
+
+如果你是第一次看代码，可以优先按这个顺序读：
+
+1. [stego_dispatcher.py](/root/autodl-tmp/stego-kit/stegokit/core/stego_dispatcher.py)
+2. [stego_context.py](/root/autodl-tmp/stego-kit/stegokit/core/stego_context.py)
+3. [stego_registry.py](/root/autodl-tmp/stego-kit/stegokit/core/stego_registry.py)
+4. 具体算法实现目录
 
 ## 论文引用
 
