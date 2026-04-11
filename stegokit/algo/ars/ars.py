@@ -13,8 +13,8 @@ from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
 from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
 
 
-class AsymmetricStrategy:
-    """Asymmetric steganography strategy adapted from demo.ipynb/fast_decode.py."""
+class ARSStrategy:
+    """Asymmetric-resource steganography strategy adapted from demo.ipynb/fast_decode.py."""
 
     @staticmethod
     def _sampling_function(x, func_type: int):

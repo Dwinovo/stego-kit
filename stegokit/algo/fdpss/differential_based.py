@@ -6,12 +6,12 @@ from typing import Any, Sequence
 import torch
 
 from stegokit.algo.common import _filter_distribution, _prepare_prefix_ids, _stop_on_eos
-from .common import ArtifactsCommonMixin
+from .common import FDPSSCommonMixin
 from stegokit.core.stego_algorithm import StegoDecodeResult, StegoEncodeResult
 from stegokit.core.stego_context import StegoDecodeContext, StegoEncodeContext
 
 
-class BinaryBasedStrategy(ArtifactsCommonMixin):
+class DifferentialBasedStrategy(FDPSSCommonMixin):
     def encode(self, context: StegoEncodeContext) -> StegoEncodeResult:
         encode_started_at = time.perf_counter()
         prefix_ids = _prepare_prefix_ids(context.messages, context.model, context.tokenizer)
@@ -43,7 +43,7 @@ class BinaryBasedStrategy(ArtifactsCommonMixin):
             )
             sampled_token_id = er.get("sampled_token_id")
             if sampled_token_id is None:
-                raise RuntimeError("BinaryBasedStrategy._encode_token_step returned sampled_token_id=None")
+                raise RuntimeError("DifferentialBasedStrategy._encode_token_step returned sampled_token_id=None")
             token_id = int(sampled_token_id)
             generated_ids.append(token_id)
             bits_consumed = int(er.get("bits_consumed", 0))
@@ -141,15 +141,13 @@ class BinaryBasedStrategy(ArtifactsCommonMixin):
         prg = self._require_prg(prg)
         prob, indices = self._to_tensors(prob_table, indices)
 
-        if prob[0] == 1:
-            sampled = int(indices[0].item())
-            return {"sampled_token_id": sampled, "bits_consumed": 0, "next_bit_index": bit_index}
+        indices_nonzero, bins, prob_new = self._differential_based_recombination(prob, indices)
+        prob_new = prob_new / prob_new.sum()
 
-        bins, prob_new = self._binary_based_recombination(prob, indices, precision)
         random_p = prg.generate_random(n=precision)
         cdf = torch.cumsum(prob_new, dim=0)
         bin_idx = torch.searchsorted(cdf, random_p).item()
-        bin_vals = bins[bin_idx]
+        bin_vals = indices_nonzero[bins[bin_idx]:]
 
         idx, bits = self._uni_cyclic_shift_enc(
             bit_stream=bit_stream[bit_index:],
@@ -176,14 +174,13 @@ class BinaryBasedStrategy(ArtifactsCommonMixin):
         prg = self._require_prg(prg)
         prob, indices = self._to_tensors(prob_table, indices)
 
-        if prob[0] == 1:
-            return {"bits": "", "bits_len": 0}
+        indices_nonzero, bins, prob_new = self._differential_based_recombination(prob, indices)
+        prob_new = prob_new / prob_new.sum()
 
-        bins, prob_new = self._binary_based_recombination(prob, indices, precision)
         random_p = prg.generate_random(n=precision)
         cdf = torch.cumsum(prob_new, dim=0)
         bin_idx = torch.searchsorted(cdf, random_p).item()
-        bin_vals = bins[bin_idx]
+        bin_vals = indices_nonzero[bins[bin_idx]:]
 
         prev = int(prev_token_id)
         pos = (bin_vals == prev).nonzero()

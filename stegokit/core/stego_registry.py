@@ -4,12 +4,12 @@ from typing import TypeAlias
 
 from stegokit.algo.ac.ac import ACStrategy
 from stegokit.algo.adg.adg import ADGStrategy
-from stegokit.algo.asymmetric.asymmetric import AsymmetricStrategy
-from stegokit.algo.artifacts.binary_based import BinaryBasedStrategy
-from stegokit.algo.artifacts.differential_based import DifferentialBasedStrategy
-from stegokit.algo.artifacts.stability_based import StabilityBasedStrategy
+from stegokit.algo.ars.ars import ARSStrategy
 from stegokit.algo.discop.discop import DiscopStrategy
 from stegokit.algo.discop.discop_base import DiscopBaseStrategy
+from stegokit.algo.fdpss.binary_based import BinaryBasedStrategy
+from stegokit.algo.fdpss.differential_based import DifferentialBasedStrategy
+from stegokit.algo.fdpss.stability_based import StabilityBasedStrategy
 from stegokit.algo.huffman.huffman import HuffmanStrategy
 from stegokit.algo.meteor.meteor import MeteorStrategy
 from stegokit.core.algorithm_enum import StegoAlgorithm
@@ -70,10 +70,10 @@ class StegoAlgorithmRegistry:
         registry._register_builtin(StegoAlgorithm.ADG, ADGStrategy())
         registry._register_builtin(StegoAlgorithm.DISCOP, DiscopStrategy())
         registry._register_builtin(StegoAlgorithm.DISCOP_BASE, DiscopBaseStrategy())
-        registry._register_builtin(StegoAlgorithm.DIFFERENTIAL_BASED, DifferentialBasedStrategy())
-        registry._register_builtin(StegoAlgorithm.BINARY_BASED, BinaryBasedStrategy())
-        registry._register_builtin(StegoAlgorithm.STABILITY_BASED, StabilityBasedStrategy())
+        registry._register_builtin(StegoAlgorithm.FDPSS_DIFFERENTIAL_BASED, DifferentialBasedStrategy())
+        registry._register_builtin(StegoAlgorithm.FDPSS_BINARY_BASED, BinaryBasedStrategy())
+        registry._register_builtin(StegoAlgorithm.FDPSS_STABILITY_BASED, StabilityBasedStrategy())
         registry._register_builtin(StegoAlgorithm.METEOR, MeteorStrategy())
-        registry._register_builtin(StegoAlgorithm.ASYMMETRIC, AsymmetricStrategy())
+        registry._register_builtin(StegoAlgorithm.ARS, ARSStrategy())
         registry._register_builtin(StegoAlgorithm.HUFFMAN, HuffmanStrategy())
         return registry

@@ -8,10 +8,10 @@ import torch
 from stegokit.algo.common import lsb_bits2int, lsb_int2bits, require_prg_method, to_tensors
 
 
-class ArtifactsCommonMixin:
+class FDPSSCommonMixin:
     @staticmethod
     def _require_prg(prg):
-        return require_prg_method(prg, "generate_random", "Artifacts strategies")
+        return require_prg_method(prg, "generate_random", "FDPSS strategies")
 
     @staticmethod
     def _to_tensors(prob_table: Sequence[float], indices: Sequence[int]) -> tuple[torch.Tensor, torch.Tensor]:
