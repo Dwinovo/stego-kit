@@ -10,6 +10,6 @@ class StegoAlgorithm(StrEnum):
     STABILITY_BASED = "stability_based"
     METEOR = "meteor"
     ASYMMETRIC = "asymmetric"
-
+    HUFFMAN = "huffman"
 
 

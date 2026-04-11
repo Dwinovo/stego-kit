@@ -9,6 +9,7 @@ from stegokit.algo.artifacts.differential_based import DifferentialBasedStrategy
 from stegokit.algo.artifacts.stability_based import StabilityBasedStrategy
 from stegokit.algo.discop.discop import DiscopStrategy
 from stegokit.algo.discop.discop_base import DiscopBaseStrategy
+from stegokit.algo.huffman.huffman import HuffmanStrategy
 from stegokit.algo.meteor.meteor import MeteorStrategy
 from stegokit.core.algorithm_enum import StegoAlgorithm
 from stegokit.core.stego_algorithm import StegoStrategy
@@ -72,4 +73,5 @@ class StegoAlgorithmRegistry:
         registry._register_builtin(StegoAlgorithm.STABILITY_BASED, StabilityBasedStrategy())
         registry._register_builtin(StegoAlgorithm.METEOR, MeteorStrategy())
         registry._register_builtin(StegoAlgorithm.ASYMMETRIC, AsymmetricStrategy())
+        registry._register_builtin(StegoAlgorithm.HUFFMAN, HuffmanStrategy())
         return registry
