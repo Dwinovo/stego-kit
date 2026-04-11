@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TypeAlias
 
 from stegokit.algo.ac.ac import ACStrategy
+from stegokit.algo.adg.adg import ADGStrategy
 from stegokit.algo.asymmetric.asymmetric import AsymmetricStrategy
 from stegokit.algo.artifacts.binary_based import BinaryBasedStrategy
 from stegokit.algo.artifacts.differential_based import DifferentialBasedStrategy
@@ -66,6 +67,7 @@ class StegoAlgorithmRegistry:
     def default(cls) -> "StegoAlgorithmRegistry":
         registry = cls()
         registry._register_builtin(StegoAlgorithm.AC, ACStrategy())
+        registry._register_builtin(StegoAlgorithm.ADG, ADGStrategy())
         registry._register_builtin(StegoAlgorithm.DISCOP, DiscopStrategy())
         registry._register_builtin(StegoAlgorithm.DISCOP_BASE, DiscopBaseStrategy())
         registry._register_builtin(StegoAlgorithm.DIFFERENTIAL_BASED, DifferentialBasedStrategy())

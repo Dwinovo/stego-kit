@@ -47,6 +47,4 @@ temp/
 *.tmp
 
 .gradio
-test/*
-!test/test_huffman_roundtrip.py
-!test/test_huffman_real_model.py
+test/

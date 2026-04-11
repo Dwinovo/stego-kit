@@ -1,4 +1,5 @@
 from .ac.ac import ACStrategy
+from .adg.adg import ADGStrategy
 from .asymmetric.asymmetric import AsymmetricStrategy
 from .artifacts.binary_based import BinaryBasedStrategy
 from .artifacts.differential_based import DifferentialBasedStrategy
@@ -10,6 +11,7 @@ from .meteor.meteor import MeteorStrategy
 
 __all__ = [
     "ACStrategy",
+    "ADGStrategy",
     "AsymmetricStrategy",
     "DiscopStrategy",
     "DiscopBaseStrategy",

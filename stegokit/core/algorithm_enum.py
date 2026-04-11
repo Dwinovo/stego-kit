@@ -3,6 +3,7 @@ from enum import StrEnum
 
 class StegoAlgorithm(StrEnum):
     AC = "ac"
+    ADG = "adg"
     DISCOP = "discop"
     DISCOP_BASE = "discop_base"
     DIFFERENTIAL_BASED = "differential_based"
@@ -11,5 +12,4 @@ class StegoAlgorithm(StrEnum):
     METEOR = "meteor"
     ASYMMETRIC = "asymmetric"
     HUFFMAN = "huffman"
-
 
