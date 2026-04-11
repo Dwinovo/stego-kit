@@ -33,6 +33,9 @@ Homepage = "https://github.com/Dwinovo/stego-kit"
 Repository = "https://github.com/Dwinovo/stego-kit"
 Issues = "https://github.com/Dwinovo/stego-kit/issues"
 
+[project.scripts]
+stegokit = "stegokit.cli.main:main"
+
 [project.optional-dependencies]
 dev = [
   "build>=1.2",
