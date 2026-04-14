@@ -341,7 +341,7 @@ dispatcher = StegoDispatcher(registry=registry)
 
 ```bibtex
 @software{stegokit2026,
-  author = {Wansheng Wu and Kaibo Huang and Yukun Wei and Zhongliang Yang and Linna Zhou},
+  author = {Wansheng Wu and Kaibo Huang and Yukun Wei and Guorui Liao and Zhongliang Yang and Linna Zhou},
   title = {StegoKit: A Unified \& Modular Generative Steganography Toolkit for LLMs},
   year = {2026},
   url = {https://github.com/your-repo-url/stego-kit}
